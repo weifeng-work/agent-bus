@@ -37,10 +37,22 @@
   .pill { display: inline-block; padding: 0 8px; border-radius: 999px; font-size: 12px; }
   .pill.req { background: #eef0ff; color: var(--brand); }
   .pill.res { background: #e7f9f1; color: #0d8f5f; }
-  .pill.reg, .pill.hb { background: #f1f2f4; color: var(--muted); }
+  .pill.reg { background: #f1f2f4; color: var(--muted); }
   .pill.err { background: #fdecea; color: #c53030; }
+  .pill.wait { background: #fff7e0; color: #b7791f; }
+  .pill.done { background: #e7f9f1; color: #0d8f5f; }
   .preview { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
   #refresh { margin-left: 12px; color: var(--muted); font-size: 12px; }
+  /* 任务/结果配对：结果行为缩进子行 */
+  tr.child td { background: #fafbff; }
+  tr.child td:first-child::before { content: "└ "; color: var(--muted); }
+  tr.detail td { background: #f8f9fc; padding: 0; border-bottom: 1px solid var(--border); }
+  tr.detail pre { margin: 0; padding: 12px 16px; white-space: pre-wrap; word-break: break-word;
+                  font-size: 12px; line-height: 1.7; max-height: 420px; overflow: auto;
+                  font-family: "SF Mono", Consolas, "Courier New", monospace; }
+  .exp-btn { color: var(--brand); cursor: pointer; font-size: 12px; border: none;
+             background: none; padding: 0; margin-left: 10px; white-space: nowrap; }
+  .exp-btn:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
@@ -53,9 +65,9 @@
   <h2>已注册智能体</h2>
   <div class="agents" id="agents"></div>
 
-  <h2>消息时间线（全部来往可追溯）<span id="refresh">每 3 秒自动刷新</span></h2>
+  <h2>消息时间线（任务与结果配对显示）<span id="refresh">每 3 秒自动刷新 · 心跳不入库</span></h2>
   <table>
-    <thead><tr><th style="width:150px">时间</th><th style="width:70px">类型</th>
+    <thead><tr><th style="width:150px">时间</th><th style="width:80px">类型</th>
       <th style="width:130px">发送方</th><th style="width:130px">接收方</th><th>内容摘要</th></tr></thead>
     <tbody id="messages"></tbody>
   </table>
@@ -71,12 +83,131 @@
 const fmt = ts => new Date(ts * 1000).toLocaleString("zh-CN", { hour12: false });
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
+// 展开状态：message id 集合（3 秒重渲染后恢复）
+const expanded = new Set();
+
 function summarize(m) {
-  const p = m.payload ? JSON.parse(m.payload) : {};
+  const p = m._p;
   if (p.type === "task_request") return (p.payload?.instruction || "").slice(0, 80);
   if (p.type === "task_result") return `[${p.status}] ${(p.result?.output_text || p.error || "").slice(0, 80)}`;
   if (p.type === "register") return `注册 · 能力: ${(p.capabilities || []).join(", ") || "-"}`;
   return "-";
+}
+
+// 展开后的完整内容（按消息类型组织关键字段，而非原始 JSON）
+function detailText(m) {
+  const p = m._p;
+  if (p.type === "task_request") {
+    let s = `【任务指令】\n${p.payload?.instruction || "-"}`;
+    if (p.payload?.context_data) s += `\n\n【附加上下文】\n${typeof p.payload.context_data === "string" ? p.payload.context_data : JSON.stringify(p.payload.context_data, null, 2)}`;
+    if (p.payload?.attachment_urls?.length) s += `\n\n【附件】\n${p.payload.attachment_urls.join("\n")}`;
+    if (p.payload?.session_id) s += `\n\n【延续会话】${p.payload.session_id}`;
+    s += `\n\n【任务编号】${p.correlation_id}\n【超时】${p.timeout_seconds}s`;
+    return s;
+  }
+  if (p.type === "task_result") {
+    let s = `【状态】${p.status}`;
+    if (p.result?.output_text) s += `\n\n【执行结果】\n${p.result.output_text}`;
+    if (p.error) s += `\n\n【错误】\n${p.error}`;
+    if (p.result?.session_id) s += `\n\n【会话 ID】${p.result.session_id}`;
+    if (p.result?.artifacts?.length) s += `\n\n【产物】\n${p.result.artifacts.join("\n")}`;
+    s += `\n\n【任务编号】${p.correlation_id}`;
+    return s;
+  }
+  if (p.type === "register") {
+    return `【名称】${p.name}\n【能力】${(p.capabilities || []).join(", ") || "-"}\n【平台】${p.platform} · ${p.executor || "sdk"}`;
+  }
+  return JSON.stringify(p, null, 2);
+}
+
+function msgRow(m, child = false, mark = "") {
+  const p = m._p;
+  const st = p.type === "task_result"
+    ? (p.status === "success" ? "res" : "err")
+    : (p.type === "task_request" ? "req" : "reg");
+  const label = p.type === "task_request" ? "任务"
+    : p.type === "task_result" ? (p.status === "success" ? "结果" : p.status)
+    : (p.type === "register" ? "注册" : p.type);
+  const isOpen = expanded.has(m.id);
+  const recv = m.target_id || (p.type === "task_result" ? "?" : "-");
+  return `<tr class="${child ? "child" : ""}">
+      <td class="muted">${fmt(m.ts)}</td>
+      <td>${mark}<span class="pill ${st}">${esc(label)}</span></td>
+      <td>${esc(m.sender_id)}</td><td class="muted">${esc(recv)}</td>
+      <td><span class="preview">${esc(summarize(m))}</span><button class="exp-btn" data-id="${m.id}">${isOpen ? "收起 ▴" : "展开 ▾"}</button></td>
+    </tr>` +
+    (isOpen ? `<tr class="detail" id="detail-${m.id}"><td colspan="5"><pre>${esc(detailText(m))}</pre></td></tr>` : "");
+}
+
+function renderMessages(msgs) {
+  // 过滤无类型消息（心跳等杂音）
+  const valid = [];
+  for (const m of msgs) {
+    try { m._p = m.payload ? JSON.parse(m.payload) : {}; } catch { m._p = {}; }
+    if (m._p.type && m._p.type !== "heartbeat") valid.push(m);
+  }
+
+  // 按 correlation_id 把任务请求与结果配对成组
+  const groups = new Map();   // cid -> { req, results, hasResult }
+  const singles = [];
+  for (const m of valid) {
+    const isTask = m._p.type === "task_request" || m._p.type === "task_result";
+    if (isTask && m.correlation_id) {
+      if (!groups.has(m.correlation_id)) groups.set(m.correlation_id, { req: null, results: [], lastTs: 0 });
+      const g = groups.get(m.correlation_id);
+      if (m._p.type === "task_request") g.req = m; else g.results.push(m);
+      g.lastTs = Math.max(g.lastTs, m.ts);
+    } else {
+      singles.push(m);
+    }
+  }
+
+  // 组与独立消息统一按最新时间倒序
+  const items = [];
+  groups.forEach(g => items.push({ kind: "g", ts: g.lastTs, g }));
+  for (const m of singles) items.push({ kind: "m", ts: m.ts, m });
+  items.sort((a, b) => b.ts - a.ts);
+
+  let html = "";
+  for (const it of items) {
+    if (it.kind === "m") { html += msgRow(it.m); continue; }
+    const { req, results } = it.g;
+    if (req) {
+      // 主行 = 任务请求；有结果时加"已回传"标记，否则"等待结果"
+      const mark = results.length > 0
+        ? `<span class="pill done">✓ 已回传</span> `
+        : `<span class="pill wait">… 等待结果</span> `;
+      html += msgRow(req, false, mark);
+      // 子行 = 结果（缩进）
+      for (const r of results) html += msgRow(r, true);
+    } else {
+      // 只有结果（请求超出 limit 截断）：结果升为主行
+      for (const r of results) html += msgRow(r);
+    }
+  }
+  document.getElementById("messages").innerHTML = html || '<tr><td colspan="5" class="muted">暂无消息</td></tr>';
+}
+
+// 展开/收起（事件委托，重渲染后状态由 expanded 集合恢复）
+document.getElementById("messages").addEventListener("click", e => {
+  const btn = e.target.closest(".exp-btn");
+  if (!btn) return;
+  const id = Number(btn.dataset.id);
+  if (expanded.has(id)) expanded.delete(id); else expanded.add(id);
+  // 局部 toggle，不打断整体渲染
+  const detail = document.getElementById("detail-" + id);
+  if (detail) {
+    detail.hidden = !expanded.has(id);
+    if (detail.hidden) detail.remove();
+  }
+  btn.textContent = expanded.has(id) ? "收起 ▴" : "展开 ▾";
+  // 若是展开且详情行不存在（首点），重渲染该表
+  if (expanded.has(id) && !document.getElementById("detail-" + id)) refreshMessages();
+});
+
+let lastMsgs = [];
+async function refreshMessages() {
+  if (lastMsgs.length) renderMessages(lastMsgs);
 }
 
 async function load() {
@@ -86,6 +217,7 @@ async function load() {
       fetch("/api/messages?limit=100").then(r => r.json()),
       fetch("/api/files").then(r => r.json()),
     ]);
+    lastMsgs = msgs;
     document.getElementById("conn").classList.remove("off");
     document.getElementById("status").textContent =
       `${agents.filter(a => a.online).length}/${agents.length} 在线 · ${msgs.length} 条消息 · ${files.length} 个文件`;
@@ -97,17 +229,7 @@ async function load() {
         <div class="meta">${esc(a.agent_id)} · ${esc(a.platform)} · ${esc(a.executor || "sdk")}</div>
       </div>`).join("") || '<div class="meta">暂无注册节点</div>';
 
-    const typePill = { task_request: ["req", "任务"], task_result: ["res", "结果"],
-                       register: ["reg", "注册"], heartbeat: ["hb", "心跳"] };
-    document.getElementById("messages").innerHTML = msgs.map(m => {
-      const p = m.payload ? JSON.parse(m.payload) : {};
-      const st = p.status === "success" ? "res" : (p.status ? "err" : (typePill[m.msg_type]?.[0] || "reg"));
-      const label = m.msg_type === "task_result" ? (p.status === "success" ? "结果" : p.status) : (typePill[m.msg_type]?.[1] || m.msg_type);
-      return `<tr><td class="muted">${fmt(m.ts)}</td>
-        <td><span class="pill ${st}">${esc(label)}</span></td>
-        <td>${esc(m.sender_id)}</td><td class="muted">${esc(m.target_id || "-")}</td>
-        <td class="preview" title="${esc(summarize(m))}">${esc(summarize(m))}</td></tr>`;
-    }).join("") || '<tr><td colspan="5" class="muted">暂无消息</td></tr>';
+    renderMessages(msgs);
 
     document.getElementById("files").innerHTML = files.map(f => `
       <tr><td>${esc(f.name)}</td><td class="muted">${(f.size / 1024).toFixed(1)} KB</td>

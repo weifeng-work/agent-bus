@@ -67,6 +67,7 @@ def make_task_result(
     msg.update({
         "task_id": request.get("task_id", ""),
         "correlation_id": request.get("correlation_id", ""),
+        "target_id": request.get("sender_id", ""),  # 接收方=原任务发起方，消息自包含便于追溯
         "status": status,
         "result": {
             "output_text": output_text,

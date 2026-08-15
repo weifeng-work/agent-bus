@@ -120,11 +120,23 @@ class Store:
     # ---- messages ----
 
     def log_message(self, topic: str, msg: dict):
+        # 心跳不进时间线：在线状态由 agents 表管理，入库只会刷屏
+        if topic.startswith("bus/heartbeat/"):
+            return
+        target_id = msg.get("target_id", "")
+        # task_result 兜底：旧版客户端不带 target_id，按 correlation_id 查原请求发起方
+        if msg.get("type") == "task_result" and not target_id and msg.get("correlation_id"):
+            rows = self.execute(
+                "SELECT sender_id FROM messages WHERE correlation_id=? AND msg_type='task_request' LIMIT 1",
+                (msg["correlation_id"],), fetch=True,
+            )
+            if rows:
+                target_id = rows[0]["sender_id"]
         self.execute(
             """INSERT INTO messages(ts,topic,msg_type,sender_id,target_id,task_id,correlation_id,status,payload)
                VALUES(?,?,?,?,?,?,?,?,?)""",
             (time.time(), topic, msg.get("type", ""), msg.get("sender_id", ""),
-             msg.get("target_id", ""), msg.get("task_id", ""),
+             target_id, msg.get("task_id", ""),
              msg.get("correlation_id", ""), msg.get("status", ""),
              json.dumps(msg, ensure_ascii=False)),
         )
