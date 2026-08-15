@@ -1,0 +1,18 @@
+# 运行时数据（本地消息库 / 上传文件 / 执行器工作目录）—— 绝不入库
+data/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+venv/
+
+# 环境与密钥
+.env
+*.pem
+*.key
+
+# 系统
+.DS_Store
+Thumbs.db
