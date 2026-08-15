@@ -71,6 +71,11 @@ class Store:
                 );
                 """
             )
+            # 增量迁移：为旧库补 hostname 列（已存在则忽略）
+            try:
+                self.conn.execute("ALTER TABLE agents ADD COLUMN hostname TEXT")
+            except sqlite3.OperationalError:
+                pass
 
     def execute(self, sql, params=(), fetch=False):
         with _db_lock, self.conn:
@@ -82,14 +87,15 @@ class Store:
 
     def upsert_agent(self, msg: dict):
         self.execute(
-            """INSERT INTO agents(agent_id,name,capabilities,platform,executor,online,last_seen,registered_at)
-               VALUES(?,?,?,?,?,1,?,?)
+            """INSERT INTO agents(agent_id,name,capabilities,platform,executor,hostname,online,last_seen,registered_at)
+               VALUES(?,?,?,?,?,?,1,?,?)
                ON CONFLICT(agent_id) DO UPDATE SET
                  name=excluded.name, capabilities=excluded.capabilities,
                  platform=excluded.platform, executor=excluded.executor,
+                 hostname=excluded.hostname,
                  online=1, last_seen=excluded.last_seen""",
             (msg["agent_id"], msg.get("name", ""), json.dumps(msg.get("capabilities", [])),
-             msg.get("platform", ""), msg.get("executor", ""),
+             msg.get("platform", ""), msg.get("executor", ""), msg.get("hostname", ""),
              time.time(), msg.get("registered_at", time.time())),
         )
 
@@ -112,6 +118,7 @@ class Store:
                 "agent_id": r["agent_id"], "name": r["name"],
                 "capabilities": json.loads(r["capabilities"] or "[]"),
                 "platform": r["platform"], "executor": r["executor"],
+                "hostname": r["hostname"] or "",
                 "online": bool(r["online"]) and not stale,
                 "last_seen": r["last_seen"], "registered_at": r["registered_at"],
             })

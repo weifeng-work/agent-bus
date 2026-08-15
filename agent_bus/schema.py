@@ -13,7 +13,8 @@ def _base(msg_type: str, sender_id: str) -> dict:
     }
 
 
-def make_register(agent_id: str, name: str, capabilities=None, platform="", executor="") -> dict:
+def make_register(agent_id: str, name: str, capabilities=None, platform="",
+                  executor="", hostname="") -> dict:
     msg = _base("register", agent_id)
     msg.update({
         "agent_id": agent_id,
@@ -21,6 +22,7 @@ def make_register(agent_id: str, name: str, capabilities=None, platform="", exec
         "capabilities": capabilities or [],
         "platform": platform,
         "executor": executor,
+        "hostname": hostname,
         "registered_at": time.time(),
     })
     return msg

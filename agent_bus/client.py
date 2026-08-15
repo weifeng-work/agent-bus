@@ -126,6 +126,7 @@ class AgentBus:
             capabilities=self.capabilities,
             platform=_platform.system().lower(),
             executor=self.executor,
+            hostname=_platform.node(),
         )
         self._client.publish("bus/register", json.dumps(msg), qos=1, retain=True)
         log.info("[%s] 已注册: %s", self.agent_id, self.name)

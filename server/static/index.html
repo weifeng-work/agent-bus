@@ -28,6 +28,18 @@
   .badge { font-size: 11px; padding: 1px 8px; border-radius: 999px; margin-left: auto; }
   .badge.on { background: #e7f9f1; color: #0d8f5f; }
   .badge.off { background: #f1f2f4; color: var(--muted); }
+  /* 机器分组：组头标系统+主机名，组内 CLI/GUI 分栏 */
+  .host-group { margin-bottom: 16px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--card); }
+  .host-header { display: flex; align-items: center; gap: 10px; padding: 9px 14px;
+                 background: #eef0f7; border-bottom: 1px solid var(--border); font-weight: 600; font-size: 13px; }
+  .host-header .os-tag { font-size: 11px; padding: 2px 9px; border-radius: 999px; background: var(--brand); color: #fff; font-weight: 600; }
+  .host-header .host-count { margin-left: auto; font-size: 11px; color: var(--muted); font-weight: 500; }
+  .host-section { padding: 10px 14px; }
+  .host-section + .host-section { border-top: 1px dashed var(--border); }
+  .sec-label { font-size: 11px; color: var(--muted); font-weight: 700; margin: 0 0 8px; letter-spacing: .5px; }
+  .sec-label.cli { color: #4b3fe3; }
+  .sec-label.gui { color: #0d8f5f; }
+  .host-section .agents { gap: 10px; }
   table { width: 100%; border-collapse: collapse; background: var(--card);
           border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
   th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 13px; }
@@ -211,6 +223,54 @@ async function refreshMessages() {
   if (lastMsgs.length) renderMessages(lastMsgs);
 }
 
+const OS_LABEL = { windows: "Windows", linux: "Linux", darwin: "macOS", macos: "macOS" };
+const isGui = a => /gui/i.test(a.executor || "");
+
+function agentCard(a) {
+  return `<div class="agent">
+    <div class="name"><span class="dot ${a.online ? "" : "off"}"></span>${esc(a.name)}
+      <span class="badge ${a.online ? "on" : "off"}">${a.online ? "在线" : "离线"}</span></div>
+    <div class="meta">${esc(a.agent_id)} · ${esc(a.executor || "sdk")}</div>
+  </div>`;
+}
+
+function renderAgents(agents) {
+  // 一级按 hostname 分组（空则归 "_unknown"，避免不同机器混并）
+  const hostMap = new Map();
+  for (const a of agents) {
+    const host = a.hostname || "_unknown";
+    if (!hostMap.has(host)) hostMap.set(host, []);
+    hostMap.get(host).push(a);
+  }
+  // 主机排序：先按 platform 再按 hostname，同类系统聚拢
+  const hosts = [...hostMap.entries()].sort((a, b) => {
+    const pa = a[1][0].platform || "zzz", pb = b[1][0].platform || "zzz";
+    return pa !== pb ? (pa < pb ? -1 : 1) : (a[0] < b[0] ? -1 : 1);
+  });
+  let html = "";
+  for (const [host, list] of hosts) {
+    const plat = list[0].platform || "unknown";
+    const osLabel = OS_LABEL[plat] || plat;
+    const hostLabel = host === "_unknown" ? "未知主机" : host;
+    const onlineN = list.filter(a => a.online).length;
+    const cli = list.filter(a => !isGui(a));
+    const gui = list.filter(a => isGui(a));
+    html += `<div class="host-group">
+      <div class="host-header">
+        <span class="os-tag">${esc(osLabel)}</span><span>${esc(hostLabel)}</span>
+        <span class="host-count">${onlineN}/${list.length} 在线</span>
+      </div>`;
+    for (const [label, cls, sub] of [["CLI", "cli", cli], ["GUI", "gui", gui]]) {
+      if (!sub.length) continue;
+      html += `<div class="host-section"><div class="sec-label ${cls}">${label}</div><div class="agents">`;
+      html += sub.map(agentCard).join("");
+      html += `</div></div>`;
+    }
+    html += `</div>`;
+  }
+  document.getElementById("agents").innerHTML = html || '<div class="meta">暂无注册节点</div>';
+}
+
 async function load() {
   try {
     const [agents, msgs, files] = await Promise.all([
@@ -223,12 +283,7 @@ async function load() {
     document.getElementById("status").textContent =
       `${agents.filter(a => a.online).length}/${agents.length} 在线 · ${msgs.length} 条消息 · ${files.length} 个文件`;
 
-    document.getElementById("agents").innerHTML = agents.map(a => `
-      <div class="agent">
-        <div class="name"><span class="dot ${a.online ? "" : "off"}"></span>${esc(a.name)}
-          <span class="badge ${a.online ? "on" : "off"}">${a.online ? "在线" : "离线"}</span></div>
-        <div class="meta">${esc(a.agent_id)} · ${esc(a.platform)} · ${esc(a.executor || "sdk")}</div>
-      </div>`).join("") || '<div class="meta">暂无注册节点</div>';
+    renderAgents(agents);
 
     renderMessages(msgs);
 
