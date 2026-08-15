@@ -80,14 +80,67 @@ def extract_json(text: str):
     return None
 
 
+def _extract_assistant_text(evt: dict) -> list:
+    """从一条 assistant 事件中提取所有可读文本。
+
+    兼容 CodeBuddy 不同版本/格式的 stream-json 事件结构：
+      - 标准结构: {type:"message", role:"assistant", content:[{type:"output_text", text:"..."}]}
+      - 简化版:  {type:"assistant", text:"..."}
+      - 增量版:  {type:"message", role:"assistant", delta:{text:"..."}}
+      - content 字段名差异: output_text | text | output
+    """
+    texts = []
+    if not isinstance(evt, dict):
+        return texts
+    # 顶层 text 字段（简化版事件）
+    if isinstance(evt.get("text"), str) and evt["text"]:
+        texts.append(evt["text"])
+    # content 数组（标准结构）
+    content = evt.get("content")
+    if isinstance(content, list):
+        for c in content:
+            if not isinstance(c, dict):
+                continue
+            ctype = c.get("type", "")
+            if ctype in ("output_text", "text", "output"):
+                t = c.get("text", "")
+                if t:
+                    texts.append(t)
+            elif ctype == "delta" and isinstance(c.get("text"), str) and c["text"]:
+                texts.append(c["text"])
+    # delta 字段（流式增量）
+    delta = evt.get("delta")
+    if isinstance(delta, str) and delta:
+        texts.append(delta)
+    elif isinstance(delta, dict):
+        t = delta.get("text") or delta.get("content")
+        if isinstance(t, str) and t:
+            texts.append(t)
+    return texts
+
+
+def _is_assistant_event(evt: dict) -> bool:
+    """判断一条事件是否为 assistant 输出（兼容多种事件类型/role 命名）。"""
+    if not isinstance(evt, dict):
+        return False
+    etype = evt.get("type", "")
+    role = evt.get("role", "")
+    if etype in ("assistant", "assistant_message", "output_text", "text"):
+        return True
+    if etype == "message" and role == "assistant":
+        return True
+    # 兜底：含 content/delta/text 字段且非 user 的事件，按 assistant 处理
+    if role != "user" and (evt.get("content") or evt.get("delta") or evt.get("text")):
+        return etype in ("message", "message_delta", "response")
+    return False
+
+
 def _assistant_texts(events) -> str:
     """从事件数组提取全部 assistant 输出文本（兜底）。"""
     parts = []
     for item in events if isinstance(events, list) else []:
-        if isinstance(item, dict) and item.get("role") == "assistant":
-            for c in item.get("content") or []:
-                if isinstance(c, dict) and c.get("type") == "output_text":
-                    parts.append(c.get("text", ""))
+        if _is_assistant_event(item):
+            parts.extend(_extract_assistant_text(item))
     return "\n".join(p for p in parts if p)
 
 
@@ -229,60 +282,72 @@ class CodeBuddyExecutor:
 
     def _run_codebuddy_live(self, prompt: str, session_id, timeout: int,
                             cwd: Path, req: dict):
-        """前台 live 模式：codebuddy stdout 逐行实时打印到终端（给旁观者看），
-        同时收集 stream-json 事件用于解析 result/session_id。"""
+        """前台 live 模式：CodeBuddy stdout 逐行实时打印到终端（给旁观者看），
+        同时收集 stream-json 事件用于解析 result/session_id。
+
+        兼容多种事件结构（详见 _is_assistant_event / _extract_assistant_text）。
+        若实时未捕获到 assistant 文本但 result 事件含正文，会兜底补打一次，
+        保证旁观者总能看到 CodeBuddy 的实际回复。
+        """
         cmd = [self.cb_path, "-p"]
         if session_id:
             cmd += ["--resume", str(session_id)]
         cmd += ["--output-format", "stream-json", "-y", prompt]
 
         # ── 任务信封：在终端打印任务来源，让旁观者看懂发生了什么 ──
-        print("\n" + "=" * 60)
-        print(f"  [LIVE] 收到任务 from {req.get('sender_id', '?')}")
-        print(f"  任务编号: {req.get('correlation_id', '?')[:16]}...")
-        print(f"  指令: {req.get('payload', {}).get('instruction', '')[:120]}")
+        print("\n" + "=" * 60, flush=True)
+        print(f"  [LIVE] 收到任务 from {req.get('sender_id', '?')}", flush=True)
+        print(f"  任务编号: {req.get('correlation_id', '?')[:16]}...", flush=True)
+        print(f"  指令: {req.get('payload', {}).get('instruction', '')[:120]}", flush=True)
         if session_id:
-            print(f"  延续会话: {session_id[:16]}...")
-        print("=" * 60)
-        print("  CodeBuddy 开始执行...\n")
+            print(f"  延续会话: {session_id[:16]}...", flush=True)
+        print("=" * 60, flush=True)
+        print("  CodeBuddy 开始执行...\n", flush=True)
 
         collected_lines = []
         final_output = ""
         final_session = session_id
+        assistant_printed = False   # 实时是否已打印过 assistant 正文
+        seen_event_types = set()     # 调试用：记录所有事件类型
 
         try:
             proc = subprocess.Popen(
                 cmd, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, encoding="utf-8", errors="replace",
+                bufsize=1,  # 行缓冲，配合 text=True 尽早吐出
             )
             # 逐行读取 stdout，实时打印 + 累积
             for line in proc.stdout:
                 collected_lines.append(line)
-                # 尝试解析 stream-json 事件，提取人类可读内容
                 line_stripped = line.strip()
                 if not line_stripped:
                     continue
                 try:
                     evt = json.loads(line_stripped)
-                    if not isinstance(evt, dict):
-                        continue
-                    etype = evt.get("type", "")
-                    # assistant 文本输出 → 实时打印（朋友能看懂）
-                    if etype == "message" and evt.get("role") == "assistant":
-                        for c in evt.get("content") or []:
-                            if isinstance(c, dict) and c.get("type") == "output_text":
-                                txt = c.get("text", "")
-                                if txt:
-                                    print(txt, end="", flush=True)
-                    # result 事件 → 提取最终结论和 session_id
-                    elif etype == "result":
-                        final_output = evt.get("result", "")
-                        sid = evt.get("session_id") or evt.get("sessionId")
-                        if sid:
-                            final_session = sid
-                except (ValueError, KeyError):
-                    # 非 JSON 行，原样打印（工具调用日志等）
+                except ValueError:
+                    # 非 JSON 行：原样打印（可能是工具调用日志、进度条等）
                     print(line, end="", flush=True)
+                    continue
+                if not isinstance(evt, dict):
+                    continue
+
+                etype = evt.get("type", "")
+                if etype:
+                    seen_event_types.add(etype)
+                log.debug("stream-json 事件 type=%s role=%s", etype, evt.get("role", ""))
+
+                # assistant 文本输出 → 实时打印（朋友能看懂）
+                if _is_assistant_event(evt):
+                    for txt in _extract_assistant_text(evt):
+                        if txt:
+                            print(txt, end="", flush=True)
+                            assistant_printed = True
+                # result 事件 → 提取最终结论和 session_id
+                elif etype == "result":
+                    final_output = evt.get("result", "") or evt.get("output_text", "") or ""
+                    sid = evt.get("session_id") or evt.get("sessionId")
+                    if sid:
+                        final_session = sid
 
             proc.wait(timeout=timeout)
 
@@ -292,18 +357,41 @@ class CodeBuddyExecutor:
         except Exception as e:
             return "", final_session, "error", f"拉起 CodeBuddy 失败: {e}"
 
-        print(f"\n\n{'=' * 60}")
-        print(f"  [LIVE] CodeBuddy 执行完成 exit_code={proc.returncode}")
-        print(f"  回传结果 ({len(final_output)} 字符) 给 {req.get('sender_id', '?')}")
-        print("=" * 60 + "\n")
+        print(f"\n\n{'=' * 60}", flush=True)
+        print(f"  [LIVE] CodeBuddy 执行完成 exit_code={proc.returncode}", flush=True)
+        print(f"  回传结果 ({len(final_output)} 字符) 给 {req.get('sender_id', '?')}", flush=True)
+        if seen_event_types:
+            log.info("本次 stream-json 事件类型: %s", sorted(seen_event_types))
+        print("=" * 60 + "\n", flush=True)
 
-        # 兜底：如果 stream-json 没解析到 result，尝试整体解析累积的输出
+        # 兜底1：实时没打印过 assistant 文本，但 result 事件里有正文 → 补打一次
+        # （覆盖 CodeBuddy 把整段回复塞进 result.result 而未发 message 事件的情况）
+        if not assistant_printed and final_output:
+            print("─" * 60, flush=True)
+            print("[CodeBuddy 回复正文]", flush=True)
+            print(final_output, flush=True)
+            print("[/CodeBuddy 回复正文]", flush=True)
+            print("─" * 60 + "\n", flush=True)
+
+        # 兜底2：stream-json 没解析到 result，尝试整体解析累积的输出
         if not final_output:
             full = "".join(collected_lines)
             output, sid = parse_codebuddy_output(full)
             final_output = output
             if sid:
                 final_session = sid
+            # 兜底3：整体解析后仍没拿到，但实时已经打印过 assistant 文本，用打印过的内容
+            if not final_output and assistant_printed:
+                events = []
+                for l in collected_lines:
+                    s = l.strip()
+                    if not s or not (s.startswith("{") or s.startswith("[")):
+                        continue
+                    try:
+                        events.append(json.loads(s))
+                    except ValueError:
+                        continue
+                final_output = _assistant_texts(events)
 
         if proc.returncode != 0 and not final_output:
             return (proc.stderr or "")[:4000], final_session, "error", \
