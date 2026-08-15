@@ -11,6 +11,7 @@
 用法:
   python executor/codebuddy_executor.py --agent-id codebuddy_pc1 --name "CodeBuddy@PC1"
   python executor/codebuddy_executor.py --mock          # 不调 CodeBuddy，模拟执行（联调用）
+  python executor/codebuddy_executor.py --live          # 前台实时输出到终端（演示用）
 """
 import argparse
 import json
@@ -135,6 +136,7 @@ def build_prompt(req: dict, workdir: Path, cli_path: Path) -> str:
 class CodeBuddyExecutor:
     def __init__(self, args):
         self.args = args
+        self.live = getattr(args, "live", False)
         self.cb_path = None if args.mock else find_codebuddy()
         self.workdir = Path(args.workdir).resolve()
         self.workdir.mkdir(parents=True, exist_ok=True)
@@ -183,6 +185,9 @@ class CodeBuddyExecutor:
         started = time.time()
         if self.args.mock:
             output, session_id, status, error = self._run_mock(req, local_files)
+        elif self.live:
+            output, session_id, status, error = self._run_codebuddy_live(
+                prompt, payload.get("session_id"), timeout, self.workdir, req)
         else:
             output, session_id, status, error = self._run_codebuddy(prompt, payload.get("session_id"), timeout, self.workdir)
 
@@ -222,6 +227,89 @@ class CodeBuddyExecutor:
         return raw[:4000], None, ("success" if proc.returncode == 0 else "error"), \
                None if proc.returncode == 0 else f"exit_code={proc.returncode}"
 
+    def _run_codebuddy_live(self, prompt: str, session_id, timeout: int,
+                            cwd: Path, req: dict):
+        """前台 live 模式：codebuddy stdout 逐行实时打印到终端（给旁观者看），
+        同时收集 stream-json 事件用于解析 result/session_id。"""
+        cmd = [self.cb_path, "-p"]
+        if session_id:
+            cmd += ["--resume", str(session_id)]
+        cmd += ["--output-format", "stream-json", "-y", prompt]
+
+        # ── 任务信封：在终端打印任务来源，让旁观者看懂发生了什么 ──
+        print("\n" + "=" * 60)
+        print(f"  [LIVE] 收到任务 from {req.get('sender_id', '?')}")
+        print(f"  任务编号: {req.get('correlation_id', '?')[:16]}...")
+        print(f"  指令: {req.get('payload', {}).get('instruction', '')[:120]}")
+        if session_id:
+            print(f"  延续会话: {session_id[:16]}...")
+        print("=" * 60)
+        print("  CodeBuddy 开始执行...\n")
+
+        collected_lines = []
+        final_output = ""
+        final_session = session_id
+
+        try:
+            proc = subprocess.Popen(
+                cmd, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", errors="replace",
+            )
+            # 逐行读取 stdout，实时打印 + 累积
+            for line in proc.stdout:
+                collected_lines.append(line)
+                # 尝试解析 stream-json 事件，提取人类可读内容
+                line_stripped = line.strip()
+                if not line_stripped:
+                    continue
+                try:
+                    evt = json.loads(line_stripped)
+                    if not isinstance(evt, dict):
+                        continue
+                    etype = evt.get("type", "")
+                    # assistant 文本输出 → 实时打印（朋友能看懂）
+                    if etype == "message" and evt.get("role") == "assistant":
+                        for c in evt.get("content") or []:
+                            if isinstance(c, dict) and c.get("type") == "output_text":
+                                txt = c.get("text", "")
+                                if txt:
+                                    print(txt, end="", flush=True)
+                    # result 事件 → 提取最终结论和 session_id
+                    elif etype == "result":
+                        final_output = evt.get("result", "")
+                        sid = evt.get("session_id") or evt.get("sessionId")
+                        if sid:
+                            final_session = sid
+                except (ValueError, KeyError):
+                    # 非 JSON 行，原样打印（工具调用日志等）
+                    print(line, end="", flush=True)
+
+            proc.wait(timeout=timeout)
+
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            return "", final_session, "timeout", f"CodeBuddy 执行超时（>{timeout}s）"
+        except Exception as e:
+            return "", final_session, "error", f"拉起 CodeBuddy 失败: {e}"
+
+        print(f"\n\n{'=' * 60}")
+        print(f"  [LIVE] CodeBuddy 执行完成 exit_code={proc.returncode}")
+        print(f"  回传结果 ({len(final_output)} 字符) 给 {req.get('sender_id', '?')}")
+        print("=" * 60 + "\n")
+
+        # 兜底：如果 stream-json 没解析到 result，尝试整体解析累积的输出
+        if not final_output:
+            full = "".join(collected_lines)
+            output, sid = parse_codebuddy_output(full)
+            final_output = output
+            if sid:
+                final_session = sid
+
+        if proc.returncode != 0 and not final_output:
+            return (proc.stderr or "")[:4000], final_session, "error", \
+                   f"exit_code={proc.returncode}"
+        return final_output[:4000], final_session, "success", None
+
     def _run_mock(self, req: dict, local_files):
         time.sleep(0.3)
         payload = req.get("payload", {})
@@ -233,7 +321,8 @@ class CodeBuddyExecutor:
 
     def run(self):
         self.bus.connect(register=True)
-        log.info("执行器就绪 mock=%s workdir=%s 等待任务...", self.args.mock, self.workdir)
+        log.info("执行器就绪 mock=%s live=%s workdir=%s 等待任务...",
+                 self.args.mock, self.live, self.workdir)
         try:
             while True:
                 for msg in self.bus.poll_inbox(timeout=2.0):
@@ -257,6 +346,8 @@ def main():
     parser.add_argument("--agent-id", required=True)
     parser.add_argument("--name", default="")
     parser.add_argument("--mock", action="store_true", help="模拟执行，不调用 CodeBuddy")
+    parser.add_argument("--live", action="store_true",
+                        help="前台 live 模式：CodeBuddy 输出实时打印到终端（演示用）")
     parser.add_argument("--workdir", default=str(ROOT_DIR / "data" / "executor_work"))
     parser.add_argument("--timeout", type=int, default=1800, help="单任务硬超时（秒）")
     parser.add_argument("--broker-host", default=None)
