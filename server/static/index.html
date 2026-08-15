@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Bus 控制面板</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #fff; --border: #e3e5ea;
+    --text: #1c1e24; --muted: #6b7280; --brand: #4b3fe3;
+    --green: #1dc981; --gray: #9ca3af;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.6 "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 14px 24px;
+           background: var(--card); border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 17px; margin: 0; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
+  .dot.off { background: var(--gray); }
+  #status { color: var(--muted); font-size: 12px; margin-left: auto; }
+  main { max-width: 1100px; margin: 0 auto; padding: 20px 24px 60px; }
+  h2 { font-size: 14px; color: var(--muted); font-weight: 600; margin: 24px 0 10px; }
+  .agents { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+  .agent { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+  .agent .name { font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .agent .meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .badge { font-size: 11px; padding: 1px 8px; border-radius: 999px; margin-left: auto; }
+  .badge.on { background: #e7f9f1; color: #0d8f5f; }
+  .badge.off { background: #f1f2f4; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; background: var(--card);
+          border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 13px; }
+  th { background: #fafbfc; color: var(--muted); font-weight: 600; }
+  tr:last-child td { border-bottom: none; }
+  td.muted { color: var(--muted); }
+  .pill { display: inline-block; padding: 0 8px; border-radius: 999px; font-size: 12px; }
+  .pill.req { background: #eef0ff; color: var(--brand); }
+  .pill.res { background: #e7f9f1; color: #0d8f5f; }
+  .pill.reg, .pill.hb { background: #f1f2f4; color: var(--muted); }
+  .pill.err { background: #fdecea; color: #c53030; }
+  .preview { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+  #refresh { margin-left: 12px; color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="dot" id="conn"></div>
+  <h1>Agent Bus 控制面板</h1>
+  <span id="status">连接中…</span>
+</header>
+<main>
+  <h2>已注册智能体</h2>
+  <div class="agents" id="agents"></div>
+
+  <h2>消息时间线（全部来往可追溯）<span id="refresh">每 3 秒自动刷新</span></h2>
+  <table>
+    <thead><tr><th style="width:150px">时间</th><th style="width:70px">类型</th>
+      <th style="width:130px">发送方</th><th style="width:130px">接收方</th><th>内容摘要</th></tr></thead>
+    <tbody id="messages"></tbody>
+  </table>
+
+  <h2>文件（Claim-Check）</h2>
+  <table>
+    <thead><tr><th>文件名</th><th style="width:90px">大小</th><th style="width:120px">上传者</th>
+      <th style="width:150px">时间</th><th style="width:110px">ID</th></tr></thead>
+    <tbody id="files"></tbody>
+  </table>
+</main>
+<script>
+const fmt = ts => new Date(ts * 1000).toLocaleString("zh-CN", { hour12: false });
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function summarize(m) {
+  const p = m.payload ? JSON.parse(m.payload) : {};
+  if (p.type === "task_request") return (p.payload?.instruction || "").slice(0, 80);
+  if (p.type === "task_result") return `[${p.status}] ${(p.result?.output_text || p.error || "").slice(0, 80)}`;
+  if (p.type === "register") return `注册 · 能力: ${(p.capabilities || []).join(", ") || "-"}`;
+  return "-";
+}
+
+async function load() {
+  try {
+    const [agents, msgs, files] = await Promise.all([
+      fetch("/api/agents").then(r => r.json()),
+      fetch("/api/messages?limit=100").then(r => r.json()),
+      fetch("/api/files").then(r => r.json()),
+    ]);
+    document.getElementById("conn").classList.remove("off");
+    document.getElementById("status").textContent =
+      `${agents.filter(a => a.online).length}/${agents.length} 在线 · ${msgs.length} 条消息 · ${files.length} 个文件`;
+
+    document.getElementById("agents").innerHTML = agents.map(a => `
+      <div class="agent">
+        <div class="name"><span class="dot ${a.online ? "" : "off"}"></span>${esc(a.name)}
+          <span class="badge ${a.online ? "on" : "off"}">${a.online ? "在线" : "离线"}</span></div>
+        <div class="meta">${esc(a.agent_id)} · ${esc(a.platform)} · ${esc(a.executor || "sdk")}</div>
+      </div>`).join("") || '<div class="meta">暂无注册节点</div>';
+
+    const typePill = { task_request: ["req", "任务"], task_result: ["res", "结果"],
+                       register: ["reg", "注册"], heartbeat: ["hb", "心跳"] };
+    document.getElementById("messages").innerHTML = msgs.map(m => {
+      const p = m.payload ? JSON.parse(m.payload) : {};
+      const st = p.status === "success" ? "res" : (p.status ? "err" : (typePill[m.msg_type]?.[0] || "reg"));
+      const label = m.msg_type === "task_result" ? (p.status === "success" ? "结果" : p.status) : (typePill[m.msg_type]?.[1] || m.msg_type);
+      return `<tr><td class="muted">${fmt(m.ts)}</td>
+        <td><span class="pill ${st}">${esc(label)}</span></td>
+        <td>${esc(m.sender_id)}</td><td class="muted">${esc(m.target_id || "-")}</td>
+        <td class="preview" title="${esc(summarize(m))}">${esc(summarize(m))}</td></tr>`;
+    }).join("") || '<tr><td colspan="5" class="muted">暂无消息</td></tr>';
+
+    document.getElementById("files").innerHTML = files.map(f => `
+      <tr><td>${esc(f.name)}</td><td class="muted">${(f.size / 1024).toFixed(1)} KB</td>
+      <td>${esc(f.uploaded_by || "-")}</td><td class="muted">${fmt(f.ts)}</td>
+      <td class="muted">${esc(f.file_id)}</td></tr>`).join("") || '<tr><td colspan="5" class="muted">暂无文件</td></tr>';
+  } catch {
+    document.getElementById("conn").classList.add("off");
+    document.getElementById("status").textContent = "服务不可达";
+  }
+}
+load();
+setInterval(load, 3000);
+</script>
+</body>
+</html>
