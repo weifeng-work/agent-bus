@@ -43,9 +43,10 @@
   .pill.done { background: #e7f9f1; color: #0d8f5f; }
   .preview { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
   #refresh { margin-left: 12px; color: var(--muted); font-size: 12px; }
-  /* 任务/结果配对：结果行为缩进子行 */
-  tr.child td { background: #fafbff; }
-  tr.child td:first-child::before { content: "└ "; color: var(--muted); }
+  /* 任务/结果配对：结果子行 = 真实缩进 + 左侧粗竖条 + 明显底色 */
+  tr.child td { background: #f2f4fa; }
+  tr.child td:first-child { padding-left: 38px; box-shadow: inset 5px 0 0 #4b3fe3; }
+  tr.child td:first-child::before { content: "└ "; color: #4b3fe3; font-weight: 700; }
   tr.detail td { background: #f8f9fc; padding: 0; border-bottom: 1px solid var(--border); }
   tr.detail pre { margin: 0; padding: 12px 16px; white-space: pre-wrap; word-break: break-word;
                   font-size: 12px; line-height: 1.7; max-height: 420px; overflow: auto;
@@ -67,7 +68,7 @@
 
   <h2>消息时间线（任务与结果配对显示）<span id="refresh">每 3 秒自动刷新 · 心跳不入库</span></h2>
   <table>
-    <thead><tr><th style="width:150px">时间</th><th style="width:80px">类型</th>
+    <thead><tr><th style="width:170px">时间</th><th style="width:80px">类型</th>
       <th style="width:130px">发送方</th><th style="width:130px">接收方</th><th>内容摘要</th></tr></thead>
     <tbody id="messages"></tbody>
   </table>
@@ -132,9 +133,9 @@ function msgRow(m, child = false, mark = "") {
   const recv = m.target_id || (p.type === "task_result" ? "?" : "-");
   return `<tr class="${child ? "child" : ""}">
       <td class="muted">${fmt(m.ts)}</td>
-      <td>${mark}<span class="pill ${st}">${esc(label)}</span></td>
+      <td style="white-space:nowrap"><span class="pill ${st}">${esc(label)}</span></td>
       <td>${esc(m.sender_id)}</td><td class="muted">${esc(recv)}</td>
-      <td><span class="preview">${esc(summarize(m))}</span><button class="exp-btn" data-id="${m.id}">${isOpen ? "收起 ▴" : "展开 ▾"}</button></td>
+      <td>${mark}<span class="preview">${esc(summarize(m))}</span><button class="exp-btn" data-id="${m.id}">${isOpen ? "收起 ▴" : "展开 ▾"}</button></td>
     </tr>` +
     (isOpen ? `<tr class="detail" id="detail-${m.id}"><td colspan="5"><pre>${esc(detailText(m))}</pre></td></tr>` : "");
 }
