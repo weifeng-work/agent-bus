@@ -20,6 +20,15 @@
 - **Claim-Check**：消息内只传文件 URL，大文件走 HTTP 文件服务。
 - **CodeBuddy 会话延续**：执行器统一在固定工作目录拉起 `codebuddy -p --output-format json -y`，解析事件数组末尾的 `type:"result"` 元素提取 `result`/`session_id`；发送方在 `payload.session_id` 带回即可 `--resume` 多轮上下文。
 
+## 节点的两种角色
+
+| 角色 | 定位 | 安装内容 | 能否被远程召唤 |
+|---|---|---|---|
+| **智能体用户（Skill 模式）** | 主动协作者：智能体在会话里调 CLI 收发消息、查在线名单 | `skill/ + agent_bus/`（约 8 个文件） | 不能（无常驻进程） |
+| **执行器节点（Worker 模式）** | 被动接活：常驻进程守收件箱，收到任务自动拉起 codebuddy headless 执行并回传 | `executor/ + skill/ + agent_bus/` | 能 |
+
+两种角色不冲突，同一台机器可同时安装。
+
 ## 目录
 
 | 路径 | 说明 |
@@ -31,7 +40,8 @@
 | `server/static/index.html` | 可视面板（在线名单 / 消息时间线 / 文件列表） |
 | `executor/codebuddy_executor.py` | CodeBuddy 节点执行器（`--mock` 联调模式） |
 | `skill/` | 通信 Skill：`SKILL.md`（提示词）+ `cli.py`（Bash 调用）+ `mcp_server.py`（MCP 工具） |
-| `scripts/setup_linux.sh` | Linux 节点一键接入脚本（通用发行版） |
+| `scripts/install_skill.sh` | 智能体用户最小安装（只装 skill，稀疏拉取） |
+| `scripts/setup_linux.sh` | 执行器节点接入（通用发行版，稀疏拉取） |
 | `tests/test_e2e.py` | 本机三进程端到端测试 |
 
 ## 快速开始（单机验证）
@@ -63,14 +73,17 @@ python skill/cli.py --id sender_test send --to codebuddy_pc1 --text "你好，�
    ```
 3. 每台机器跑一个执行器（`--agent-id` 全网唯一）。
 
-### Linux 节点一键接入（通用发行版）
+### Linux 节点接入（两种角色，按需选择）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/weifeng-work/agent-bus/main/scripts/setup_linux.sh -o setup.sh
-bash setup.sh <服务器IP>
+# 智能体用户（Skill 模式）：只装通信规则与 CLI，无常驻进程
+bash <(curl -fsSL https://raw.githubusercontent.com/weifeng-work/agent-bus/main/scripts/install_skill.sh) <服务器IP> [agent_id]
+
+# 执行器节点（Worker 模式）：可被远程召唤，自动执行任务
+bash <(curl -fsSL https://raw.githubusercontent.com/weifeng-work/agent-bus/main/scripts/setup_linux.sh) <服务器IP> [agent_id]
 ```
 
-或直接对那台机器上的 CodeBuddy 说："从 https://github.com/weifeng-work/agent-bus 获取项目，运行 scripts/setup_linux.sh <服务器IP> 完成接入"。
+或直接对那台机器上的 CodeBuddy 说："从 https://github.com/weifeng-work/agent-bus 获取项目，运行 scripts/install_skill.sh <服务器IP>（做主动协作者）或 scripts/setup_linux.sh <服务器IP>（做可召唤的执行节点）"。
 
 ## 给智能体安装通信 Skill
 

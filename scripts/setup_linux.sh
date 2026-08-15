@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Agent Bus Linux 节点一键接入脚本（通用发行版：Debian/Ubuntu/Fedora/RHEL/Arch 等）
+# Agent Bus Linux 执行器节点接入脚本（通用发行版：Debian/Ubuntu/Fedora/RHEL/Arch 等）
+# 角色：被动接活的 Worker——常驻进程守收件箱，收到任务自动拉起 codebuddy headless 执行并回传
 # 用法: ./setup_linux.sh <broker服务器IP> [agent_id]
 # 前置: 本机已安装 codebuddy CLI 并登录、python3 (>=3.10) 含 pip、git
 #       （Fedora/RHEL 若无 pip: sudo dnf install python3-pip; Debian/Ubuntu: sudo apt install python3-pip）
@@ -10,13 +11,13 @@ AGENT_ID="${2:-codebuddy_$(hostname -s)}"
 INSTALL_DIR="$HOME/agent-bus"
 REPO_URL="https://github.com/weifeng-work/agent-bus"
 
-# 1. 获取代码
-if [ ! -d "$INSTALL_DIR" ]; then
-    git clone "$REPO_URL" "$INSTALL_DIR"
-else
-    git -C "$INSTALL_DIR" pull --ff-only || echo "仓库已存在，跳过更新"
+# 1. 稀疏拉取：只要 executor/ skill/ agent_bus/（执行器所需），不下载服务端等其余文件
+if [ ! -d "$INSTALL_DIR/.git" ]; then
+    git clone --depth 1 --filter=blob:none --sparse "$REPO_URL" "$INSTALL_DIR" 2>/dev/null \
+        || git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"
 fi
 cd "$INSTALL_DIR"
+git sparse-checkout set executor skill agent_bus 2>/dev/null || true
 
 # 2. 安装执行器最小依赖（--user 装入用户目录，不动系统环境）
 python3 -m pip install --user --quiet paho-mqtt requests
