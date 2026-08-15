@@ -31,7 +31,7 @@
 | `server/static/index.html` | 可视面板（在线名单 / 消息时间线 / 文件列表） |
 | `executor/codebuddy_executor.py` | CodeBuddy 节点执行器（`--mock` 联调模式） |
 | `skill/` | 通信 Skill：`SKILL.md`（提示词）+ `cli.py`（Bash 调用）+ `mcp_server.py`（MCP 工具） |
-| `scripts/setup_debian.sh` | Debian/Linux 节点一键安装脚本 |
+| `scripts/setup_linux.sh` | Linux 节点一键接入脚本（通用发行版） |
 | `tests/test_e2e.py` | 本机三进程端到端测试 |
 
 ## 快速开始（单机验证）
@@ -63,14 +63,14 @@ python skill/cli.py --id sender_test send --to codebuddy_pc1 --text "你好，�
    ```
 3. 每台机器跑一个执行器（`--agent-id` 全网唯一）。
 
-### Debian/Linux 节点一键接入
+### Linux 节点一键接入（通用发行版）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/weifeng-work/agent-bus/main/scripts/setup_debian.sh -o setup.sh
+curl -fsSL https://raw.githubusercontent.com/weifeng-work/agent-bus/main/scripts/setup_linux.sh -o setup.sh
 bash setup.sh <服务器IP>
 ```
 
-或直接对那台机器上的 CodeBuddy 说："从 https://github.com/weifeng-work/agent-bus 获取项目，运行 scripts/setup_debian.sh <服务器IP> 完成接入"。
+或直接对那台机器上的 CodeBuddy 说："从 https://github.com/weifeng-work/agent-bus 获取项目，运行 scripts/setup_linux.sh <服务器IP> 完成接入"。
 
 ## 给智能体安装通信 Skill
 
