@@ -1,0 +1,6 @@
+paho-mqtt>=2.0
+fastapi>=0.110
+uvicorn>=0.29
+python-multipart>=0.0.9
+requests>=2.31
+mcp>=1.0
