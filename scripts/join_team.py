@@ -149,11 +149,13 @@ def main():
     ap.add_argument("--host", help="手动指定主机 IP（广播不可达时）")
     ap.add_argument("--http-port", type=int, default=8000)
     ap.add_argument("--mqtt-port", type=int, default=1883)
+    ap.add_argument("--passphrase", help="队伍口令（非交互模式传入；省略则运行时提示输入）")
+    ap.add_argument("--name", help="设备显示名（默认 <系统>@<主机名>）")
     args = ap.parse_args()
 
     dev = load_or_create_device()
     agent_id = dev["agent_id"]
-    device_name = f"{_platform.system()}@{_platform.node()}"
+    device_name = args.name or f"{_platform.system()}@{_platform.node()}"
 
     print("== agent-bus 加入队伍 ==")
     if args.host:
@@ -171,7 +173,11 @@ def main():
     team["host_ip"] = pick_alive_ip(team)  # 连通性自检（发现≠连通）
 
     print(f"  设备身份: {agent_id}（{device_name}）")
-    passphrase = getpass.getpass(f"  输入队伍 [{team['team_name']}] 的加入口令: ")
+    passphrase = args.passphrase
+    if not passphrase:
+        passphrase = getpass.getpass(f"  输入队伍 [{team['team_name']}] 的加入口令: ")
+    elif not (4 <= len(passphrase) <= 64):
+        sys.exit("口令长度需 4-64")
 
     base = f"http://{team['host_ip']}:{team['http_port']}"
     creds = join_http(base, {

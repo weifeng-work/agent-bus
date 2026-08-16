@@ -1,5 +1,7 @@
 # 运行时数据（本地消息库 / 上传文件 / 执行器工作目录）—— 绝不入库
 data/
+backend/.deps/
+.deps/
 
 # Python
 __pycache__/

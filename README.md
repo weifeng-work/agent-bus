@@ -1,103 +1,141 @@
-# Agent Bus —— 跨网络多智能体协作系统（阶段一）
+# Agent Bus —— 局域网多智能体协作总线
 
-局域网优先（可平滑迁移公网）的多智能体通信中间架构：任何机器上的智能体（首个适配：**CodeBuddy CLI**）通过统一消息总线互发任务/文件并回传结果，全程可追溯、状态可视化。
+让同一局域网内的任意智能体（CodeBuddy / OpenCode / WorkBuddy / TRAE…）互相发现、收发任务、共享文件，全程可追溯、可视化。**主机一键起服务，子设备给智能体一句提示词即可加入队伍。**
 
-## 架构
+## 核心模型
 
 ```
-[ 机器 A: Agent + Skill/CLI ] ──┐                         ┌── [ 机器 B: CodeBuddy 执行器 ]
-                                ▼                         ▲        │ subprocess(-p 模式)
-                    ┌──────────────────────────────┐      │        ▼
-                    │  中间架构（局域网一台服务器）  │──────┘   [ CodeBuddy CLI 进程 ]
-                    │  MQTT Broker (Mosquitto)      │  任务注入   stdout(JSON) 回传
-                    │  bus_server: 注册/心跳/遗嘱    │
-                    │  SQLite 消息追溯 + Web 面板    │
-                    │  HTTP 文件服务 (Claim-Check)   │
-                    └──────────────────────────────┘
+[ 主机 1 台 ]
+   运行 broker(MQTT) + bus_server(HTTP/面板)
+   面板首次向导：设置【队伍名】+【加入口令】
+   每 3s UDP 广播 beacon（队名/主机 IP/端口）→ 局域网内可被发现
+        │
+        ▼ UDP beacon 41830 / MQTT 1883 / HTTP 8000
+        │
+[ 子设备 N 台 ]
+   智能体收到一句提示词 → setup_worker_windows.ps1
+      → 发现主机 → 输入队伍口令 → 服务端核对并发凭据
+      → 保存凭据 → 启动执行器 → 作为工作节点上线
 ```
 
-- **MQTT 出站连接模型**：各节点主动连 Broker，无需内网穿透；迁公网只改地址。
-- **Claim-Check**：消息内只传文件 URL，大文件走 HTTP 文件服务。
-- **CodeBuddy 会话延续**：执行器统一在固定工作目录拉起 `codebuddy -p --output-format json -y`，解析事件数组末尾的 `type:"result"` 元素提取 `result`/`session_id`；发送方在 `payload.session_id` 带回即可 `--resume` 多轮上下文。
+- **出站连接模型**：所有节点主动连主机（MQTT/HTTP），无需公网 IP、无需内网穿透、不开入站端口。
+- **发现即用**：子设备扫描局域网 beacon 自动发现主机；广播不可达时可用 `--host <IP>` 手动指定。
+- **安全**：MQTT 禁匿名 + 每节点独立凭据 + pattern ACL；HTTP Bearer 令牌 + 角色分离（admin/node）。
+- **一句口令入队**：用户只需在面板设一个口令，子设备输对口令即自动入队、自动下发凭据。
 
-## 节点的两种角色
+## 需要什么
 
-| 角色 | 定位 | 安装内容 | 能否被远程召唤 |
-|---|---|---|---|
-| **智能体用户（Skill 模式）** | 主动协作者：智能体在会话里调 CLI 收发消息、查在线名单 | `skill/ + agent_bus/`（约 8 个文件） | 不能（无常驻进程） |
-| **执行器节点（Worker 模式）** | 被动接活：常驻进程守收件箱，收到任务自动拉起 codebuddy headless 执行并回传 | `executor/ + skill/ + agent_bus/` | 能 |
+| 角色 | 一台 Windows/Linux 机器即可 | 前置 |
+|---|---|---|
+| **主机** | Python 3.10+；配网卡接收 UDP 广播 | mosquitto 会自动装 |
+| **子设备** | Python 3.10+（自动装）；目标机器的 CLI 智能体 | 同局域网 + 队伍口令 |
 
-两种角色不冲突，同一台机器可同时安装。
+> Windows 上 Python 可用 winget 自动安装；无需 git（直接下载主分支 zip）。
+
+---
+
+## 一、主机安装（一次）
+
+在某台 Windows/Linux 机器跑一键引导（跨平台，同一脚本）：
+
+```powershell
+# Windows 或 Linux 一致：下载后运行
+python -c "import urllib.request,sys; urllib.request.urlretrieve('https://raw.githubusercontent.com/weifeng-work/agent-bus/main/scripts/setup_host.py','host.py')"
+python host.py
+```
+```bash
+# 或 Bash 一行
+curl -fsSL https://raw.githubusercontent.com/weifeng-work/agent-bus/main/scripts/setup_host.py -o host.py && python host.py
+```
+
+完成后：
+- broker(MQTT) 监听 `0.0.0.0:1883`，bus_server(HTTP+面板) 监听 `0.0.0.0:8000`
+- 自动打开面板 `http://<主机IP>:8000/`
+- **首次进入面板：设置队伍名 + 加入口令**（口令 4–64 位）→ 之后 beacon 广播自动开始
+
+面板功能：在线名单 / 消息时间线 / 文件列表 / 重置口令 / 移除节点。
+
+> 参考主机的候选 IP：`python -c "from agent_bus import provision; print(provision.get_local_ips())"`
+
+防火墙放行（入站）：`TCP 1883`（MQTT）`TCP 8000`（HTTP）`UDP 41830`（beacon 发现）。
+
+---
+
+## 二、子设备给智能体一句提示词安装
+
+在目标 Windows 电脑上，对着那台电脑的智能体说（示例）：
+
+> “用 https://github.com/weifeng-work/agent-bus 把 agent-bus 作为工作节点装到我这台 Windows。
+> 先安装/确认 Python 3.10+，然后运行：
+> `irm https://raw.githubusercontent.com/weifeng-work/agent-bus/main/scripts/setup_worker_windows.ps1 | iex`
+> 队伍口令是 `1234`。装完后启动一个 codebuddy 执行器，并告诉我分配到的 agent_id。”
+
+智能体就会自动执行 [scripts/setup_worker_windows.ps1](scripts/setup_worker_windows.ps1)：装 Python → 下载项目 → 装依赖 → 发现主机 → 入队 → 启动执行器 → 上线。
+
+如果你想手动在别的 Windows 机器操作，一行命令：
+
+```powershell
+irm https://raw.githubusercontent.com/weifeng-work/agent-bus/main/scripts/setup_worker_windows.ps1 | iex
+```
+
+脚本会交互引导：发现队伍 → 输入口令 → 拿凭据 → 启动执行器。非交互（自动化作答/脚本/CI）传参：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File setup_worker_windows.ps1 `
+  -Host 192.168.31.186 -Passphrase "1234" -Executor codebuddy
+```
+
+| 参数 | 说明 |
+|---|---|
+| `-Host` | 主机 IP（省略则 UDP 扫描自动发现） |
+| `-Passphrase` | 队伍口令（省略则交互输入） |
+| `-Executor` | 启动哪个执行器：`codebuddy` / `opencode` / `workbuddy`（默认 codebuddy） |
+| `-Name` | 设备显示名（默认 `执行器@主机名`） |
+
+脚本依次完成：下载项目到 `C:\agent-bus` → `pip install` 依赖 → `scripts/join_team.py` 入队 → 生成 `start_executor.bat` → 注册“登录时自启”计划任务并立即启动执行器。
+
+> 目标机器的 CLI 智能体（CodeBuddy/OpenCode）需已安装并登录，执行器才能接任务。
+> Linux 子设备见 [scripts/setup_linux.sh](scripts/setup_linux.sh)（角色：Skill 主动协作者 / Worker 被召唤执行）。
+
+---
+
+## 三、用起来（在主机面板 / 任意节点）
+
+1. **查看在线名单**：面板 `http://<主机IP>:8000/`，所有设备主动连主机，可见 `● 在线 / ○ 离线`。
+2. **给某节点发任务**（在 Skill 模式节点或主机上）：
+   ```bash
+   # 先登录/认证（Skill 节点）
+   python skill/cli.py agents
+   python skill/cli.py send --to codebuddy_pc2 --text "帮我在对方机器上执行 hostname 并汇报" --wait 300
+   ```
+   → 对方执行器 headless 拉起本机 CodeBuddy 执行 → 结果 + session_id 自动回传。
+3. **延续对话**：回传的 `session_id` 可带 `--session <sid>` 继续同一上下文。
+
+---
 
 ## 目录
 
 | 路径 | 说明 |
 |---|---|
-| `docs/protocol.md` | 通信契约（三类报文 + 主题设计 + 状态判定） |
-| `docs/broker_setup.md` | Mosquitto 安装配置（Windows/Linux/Docker） |
-| `agent_bus/` | Python SDK（MQTT 客户端：注册/心跳/遗嘱/收发/等待结果） |
-| `server/bus_server.py` | 服务端单进程：MQTT 桥 + SQLite + API + 文件服务 |
-| `server/static/index.html` | 可视面板（在线名单 / 消息时间线 / 文件列表） |
-| `executor/codebuddy_executor.py` | CodeBuddy 节点执行器（`--mock` 联调模式） |
-| `skill/` | 通信 Skill：`SKILL.md`（提示词）+ `cli.py`（Bash 调用）+ `mcp_server.py`（MCP 工具） |
-| `scripts/install_skill.sh` | 智能体用户最小安装（只装 skill，稀疏拉取） |
-| `scripts/setup_linux.sh` | 执行器节点接入（通用发行版，稀疏拉取） |
-| `tests/test_e2e.py` | 本机三进程端到端测试 |
+| `scripts/setup_host.py` | 主机一键引导（装 mosquitto + 起 broker/server + 打开面板） |
+| `scripts/join_team.py` | 子设备入队（发现队伍→口令→凭据→上线；支持 `--passphrase` 非交互） |
+| `scripts/setup_worker_windows.ps1` | 子设备 Windows 一键引导（装 Python/依赖/入队/启执行器） |
+| `scripts/setup_linux.sh` | Linux 子设备接入（Skill 主动 / Worker 被召） |
+| `scripts/add_node.py` / `broker_ctl.py` | 手动开凭据 / 用户态 broker 进程管理 |
+| `agent_bus/` | Python SDK（MQTT 客户端、provision 凭据、discovery 发现协议、files） |
+| `server/bus_server.py` | 服务端（MQTT 桥 + SQLite + HTTP API + Web 面板） |
+| `executor/` | 各 CLI 执行器：codebuddy / opencode / workbuddy / interactive |
+| `skill/` | 通信 Skill：`SKILL.md` + `cli.py`（CLI）+ `mcp_server.py`（MCP 工具） |
+| `docs/protocol.md` | 通信契约 + 队伍发现协议（UDP beacon v1.2） |
 
-## 快速开始（单机验证）
+## 安全模型（简）
 
-前置：Python 3.10+，Mosquitto 运行于 `127.0.0.1:1883`（回环匿名即可，见 `docs/broker_setup.md`）。
+- MQTT：`allow_anonymous false` + 每节点独立账号（PBKDF2）+ pattern ACL；凭据按角色（admin/bridge/node）区分。
+- HTTP：所有 API 需 Bearer token；仅 `/api/health` `/api/team/status` 匿名；`/api/join` 为唯一口令端。
+- **口令即信任**：子设备输对口令即自动入队。请只在可信局域网使用；跨网/公网部署需 TLS（见 `docs/broker_setup.md`）。
 
-```powershell
-pip install -r requirements.txt
+## 已知约束
 
-# 终端1: 服务端（面板 http://127.0.0.1:8000/）
-python server/bus_server.py
-
-# 终端2: CodeBuddy 执行器节点（--mock 可先不调真实 CLI 联调）
-python executor/codebuddy_executor.py --agent-id codebuddy_pc1 --name "CodeBuddy@PC1"
-
-# 终端3: 任意一端发任务（CLI 即"Skill"的命令面）
-$env:BUS_HTTP_BASE="http://127.0.0.1:8000"
-python skill/cli.py --id sender_test send --to codebuddy_pc1 --text "你好，介绍你自己" --wait 300
-```
-
-返回 JSON 中 `result.output_text` 为 CodeBuddy 最终回复，`result.session_id` 可用于下一轮 `--session <sid>` 延续上下文。
-
-## 局域网部署（多机）
-
-1. 服务端机器：开放 1883（MQTT）与 8000（HTTP）防火墙；Mosquitto 配置 `listener 1883 0.0.0.0` + `allow_anonymous true`（需管理员，见 `docs/broker_setup.md`）。
-2. 各节点环境变量：
-   ```bash
-   BUS_BROKER_HOST=<服务器IP>  BUS_HTTP_BASE=http://<服务器IP>:8000
-   ```
-3. 每台机器跑一个执行器（`--agent-id` 全网唯一）。
-
-### Linux 节点接入（两种角色，按需选择）
-
-```bash
-# 智能体用户（Skill 模式）：只装通信规则与 CLI，无常驻进程
-bash <(curl -fsSL https://raw.githubusercontent.com/weifeng-work/agent-bus/main/scripts/install_skill.sh) <服务器IP> [agent_id]
-
-# 执行器节点（Worker 模式）：可被远程召唤，自动执行任务
-bash <(curl -fsSL https://raw.githubusercontent.com/weifeng-work/agent-bus/main/scripts/setup_linux.sh) <服务器IP> [agent_id]
-```
-
-或直接对那台机器上的 CodeBuddy 说："从 https://github.com/weifeng-work/agent-bus 获取项目，运行 scripts/install_skill.sh <服务器IP>（做主动协作者）或 scripts/setup_linux.sh <服务器IP>（做可召唤的执行节点）"。
-
-## 给智能体安装通信 Skill
-
-- **CLI 方式**（任何有 Bash 的 Agent）：把 `skill/SKILL.md` 内容注入其系统提示词/规则文件，命令参考见 SKILL.md。
-- **MCP 方式**：把 `skill/mcp_server.py` 注册为 MCP Server（配置示例见该文件头部注释），提供 `list_online_agents / send_task / check_inbox / reply_task / upload_file / download_file` 工具。
-
-## 阶段二路线（未实现）
-
-- 常驻管道执行器（stdin/stdout + NDJSON 分帧、流式回传）
-- 附件产物自动上传（artifacts 回传）、PTY 代理交互式 Agent
-- macOS / 移动端适配、公网部署（TLS + 鉴权）
-
-## 已验证
-
-- 本机 e2e 测试 10/10（任务闭环、附件 Claim-Check、在线名单、消息追溯）
-- 真实 CodeBuddy 链路：任务下发 → headless 执行 → stdout 解析 → 结果回传
-- 跨进程会话延续：`--resume` 双轮问答上下文正确（暗号实验）
+- 子设备节点需保证局域网可达主机（同网段或可路由）。
+- Windows GUI 执行器（WorkBuddy）须跑在用户会话、不能锁屏；CLI 执行器无此限制。
+- 广播发现对跨 VLAN/AP 隔离可能失效，此时用 `--host <IP>` 手动加入。
