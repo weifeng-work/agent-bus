@@ -5,27 +5,26 @@
 #   片段一（推荐，让智能体照做）—— 用户只需对本机智能体说：
 #     "用 https://github.com/weifeng-work/agent-bus 把 agent-bus 作为工作节点装到我这台
 #      Windows。先把 scripts/setup_worker_windows.ps1 下载并运行，加入队伍，再启动一个
-#      codebuddy 执行器。队伍口令是：<口令>"
+#      codebuddy 执行器。"
 #
 #   片段二（手动/直接命令）:
 #   irm https://raw.githubusercontent.com/weifeng-work/agent-bus/main/scripts/setup_worker_windows.ps1 | iex
 #
 # 参数示例（不传时全部自动探测/交互）:
 #   powershell -ExecutionPolicy Bypass -File setup_worker_windows.ps1 `
-#     -Passphrase "我的队伍口令" -Executor codebuddy
+#     -Executor codebuddy
 #   powershell -ExecutionPolicy Bypass -File setup_worker_windows.ps1 `
-#     -Host 192.168.31.186 -Passphrase "口令" -Executor opencode
+#     -Host 192.168.31.186 -Executor opencode
 #
 # 做了什么:
 #   1. 检测/安装 Python（winget，3.12）；无 git 也可（直接下载主分支 zip）
 #   2. 下载项目到 C:\agent-bus
 #   3. pip 安装依赖（requirements.txt + pywinauto）
-#   4. 调用 scripts/join_team.py 发现队伍 → 输口令 → 拿凭据 → 验证上线（含 --passphrase 非交互）
+#   4. 调用 scripts/join_team.py 发现队伍 → 匿名登记入队 → 验证上线
 #   5. 启动所选执行器（codebuddy / opencode / workbuddy）并注册"登录时自启"计划任务
 #   只出站连 MQTT(1883)+HTTP(8000) 与发现用 UDP(41830)，不开入站端口、无需防火墙配置。
 #
 param(
-    [string]$Passphrase = "",
     [string]$HostIP = "",
     [string]$Executor = "codebuddy",
     [string]$Name = "",
@@ -85,15 +84,10 @@ Write-Host "  [3/5] 依赖就绪"
 # ---------- 4. 加入队伍 ----------
 Write-Host "  [4/5] 加入队伍..."
 $hostArg = if ($HostIP) { "--host $HostIP" } else { "" }
-$phArg = if ($Passphrase) { '--passphrase "' + $Passphrase + '"' } else { "" }
 $nameArg = if ($Name) { '--name "' + $Name + '"' } else { "" }
 Push-Location $InstallDir
 try {
-    if ($Passphrase) {
-        & cmd /c "cd /d $InstallDir && $py scripts\join_team.py $hostArg $phArg $nameArg"
-    } else {
-        & cmd /c "cd /d $InstallDir && $py scripts\join_team.py $hostArg $nameArg"
-    }
+    & cmd /c "cd /d $InstallDir && $py scripts\join_team.py $hostArg $nameArg"
     if ($LASTEXITCODE -ne 0) { throw "加入队伍失败（exit=$LASTEXITCODE）" }
 } finally {
     Pop-Location
