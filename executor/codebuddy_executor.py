@@ -19,6 +19,7 @@ import logging
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -56,6 +57,30 @@ def find_codebuddy() -> str:
         if path:
             return path
     raise FileNotFoundError("找不到 codebuddy 可执行文件，请确认已安装并在 PATH 中")
+
+
+# ---- CLI 登录态检测（auth_required 识别与恢复） ----
+
+# 未登录时 CLI 报错的典型特征（小写匹配；避免裸 401/403 误报任务内容）
+_AUTH_MARKERS = (
+    "未登录", "请先登录", "请登录", "登录后重试", "登录已过期",
+    "not logged in", "please log in", "please sign in", "sign in required",
+    "login required", "unauthorized", "forbidden",
+    "authentication required", "not authenticated",
+    "token expired", "invalid token", "no valid token",
+    'status":401', 'status":403', "status: 401", "status: 403",
+)
+
+AUTH_REQUIRED_HINT = (
+    "CodeBuddy CLI 未登录，无法执行任务。修复方法：在该机器的终端运行 codebuddy "
+    "（交互模式，不带 -p），按提示完成登录后退出即可；执行器会自动检测并恢复，无需重启。"
+)
+
+
+def looks_like_auth_failure(*texts) -> bool:
+    """判断 CLI 输出/报错文本是否为登录认证类失败（区别于普通任务错误）。"""
+    blob = "\n".join(t for t in texts if t).lower()
+    return any(m in blob for m in _AUTH_MARKERS)
 
 
 def extract_json(text: str):
@@ -247,6 +272,17 @@ class CodeBuddyExecutor:
         elapsed = round(time.time() - started, 2)
         log.info("任务 %s 完成 status=%s 耗时=%ss", task_id[:8], status, elapsed)
 
+        # 2.5 登录态失败识别：错误文本命中认证特征 → 标记 health 并改写为可读指引
+        if not self.args.mock:
+            if status == "error" and looks_like_auth_failure(output, error):
+                self.bus.set_health("auth_required")
+                raw_detail = ((error or "") + "\n" + (output or ""))[:400]
+                output = AUTH_REQUIRED_HINT
+                error = f"auth_required: CodeBuddy CLI 未登录（原始错误: {raw_detail}）"
+                log.warning("任务 %s 因 CLI 未登录失败，已标记 health=auth_required", task_id[:8])
+            elif status == "success" and self.bus.health == "auth_required":
+                self.bus.set_health("ok")  # 真实任务成功 → 自动恢复
+
         # 3. 回传
         self.bus.reply_task(
             req, output_text=output, status=status, error=error,
@@ -405,10 +441,40 @@ class CodeBuddyExecutor:
                   f"附件 {len(local_files)} 个: {[p.name for p in local_files]}")
         return output, f"mock-session-{req.get('task_id', '')[:8]}", "success", None
 
+    # ---------- 登录态自动恢复 ----------
+
+    def _auth_watch_loop(self):
+        """health=auth_required 期间每 60s 做一次最小探测任务。
+
+        未登录时请求被认证层拒绝（不消耗 token）；登录成功后探测通过即自动恢复，
+        之后停止探测（health=ok 不再发探测任务）。
+        """
+        while True:
+            time.sleep(60)
+            if self.bus.health != "auth_required":
+                continue
+            try:
+                proc = subprocess.run(
+                    [self.cb_path, "-p", "回复OK", "--output-format", "json", "-y"],
+                    cwd=str(self.workdir), capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", timeout=120,
+                )
+                out, _, _ = parse_codebuddy_output(proc.stdout or "")
+                if (proc.returncode == 0 and out
+                        and not looks_like_auth_failure(out, proc.stderr)):
+                    self.bus.set_health("ok")
+                    log.info("探测成功: CodeBuddy 登录态已恢复")
+                else:
+                    log.info("探测仍未登录，60s 后重试")
+            except Exception as e:
+                log.warning("登录探测异常: %s", e)
+
     # ---------- 主循环 ----------
 
     def run(self):
         self.bus.connect(register=True)
+        if not self.args.mock:
+            threading.Thread(target=self._auth_watch_loop, daemon=True).start()
         log.info("执行器就绪 mock=%s live=%s workdir=%s 等待任务...",
                  self.args.mock, self.live, self.workdir)
         try:

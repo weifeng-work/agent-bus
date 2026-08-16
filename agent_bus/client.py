@@ -36,6 +36,7 @@ class AgentBus:
         self.name = name or agent_id
         self.capabilities = capabilities or []
         self.executor = executor
+        self.health = "unknown"    # ok | auth_required | unknown（CLI 登录态）
         self.cfg = config or BusConfig.load()
         self.on_message = None          # 可选回调: fn(msg_dict)
         self._inbox: "queue.Queue[dict]" = queue.Queue()
@@ -117,7 +118,8 @@ class AgentBus:
     def _heartbeat_loop(self):
         topic = f"bus/heartbeat/{self.agent_id}"
         while True:
-            self._client.publish(topic, json.dumps({"agent_id": self.agent_id, "ts": time.time()}), qos=1)
+            self._client.publish(topic, json.dumps(
+                {"agent_id": self.agent_id, "ts": time.time(), "health": self.health}), qos=1)
             time.sleep(HEARTBEAT_INTERVAL)
 
     # ---------- 注册 ----------
@@ -129,9 +131,23 @@ class AgentBus:
             platform=_platform.system().lower(),
             executor=self.executor,
             hostname=_platform.node(),
+            health=self.health,
         )
         self._client.publish("bus/register", json.dumps(msg), qos=1, retain=True)
         log.info("[%s] 已注册: %s", self.agent_id, self.name)
+
+    def set_health(self, state: str):
+        """更新 CLI 健康态并立即推送心跳（服务端据此刷新面板徽章）。"""
+        if state not in ("ok", "auth_required", "unknown"):
+            log.warning("[%s] 忽略非法 health 状态: %s", self.agent_id, state)
+            return
+        if state == self.health:
+            return
+        self.health = state
+        topic = f"bus/heartbeat/{self.agent_id}"
+        self._client.publish(topic, json.dumps(
+            {"agent_id": self.agent_id, "ts": time.time(), "health": state}), qos=1)
+        log.info("[%s] CLI 健康态 -> %s", self.agent_id, state)
 
     # ---------- 任务 ----------
 

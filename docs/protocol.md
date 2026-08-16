@@ -88,6 +88,71 @@ Agent 启动后发布到 `bus/register`（retain=true，新加入者可立即获
 `status` ∈ `success | error | timeout`。
 `result.session_id`：CodeBuddy 会话 ID，发送方可在下一轮 `payload.session_id` 中带回以延续多轮上下文。
 
+### 2.4 任务进度 `task_progress`（v1.1 新增）
+
+交互式执行器在任务执行期间发布到 `reply_to` 主题（直播流，QoS 1）。
+发送方以 `correlation_id` 关联，`seq` 单调递增。
+
+```json
+{
+  "protocol_version": "1.0",
+  "type": "task_progress",
+  "task_id": "uuid4",
+  "correlation_id": "uuid4",
+  "sender_id": "codebuddy_tui1",
+  "target_id": "agent_alpha",
+  "seq": 3,
+  "phase": "running",
+  "result": {
+    "output_text": "重建屏幕尾部文本（节流快照）",
+    "session_id": "agentbus_codebuddy_tui1"
+  },
+  "ts": 1773400020.0
+}
+```
+
+`phase` ∈ `started | running | input_needed | done`。
+`input_needed` 表示 TUI 弹出了需要人工决策的确认框（y/n 类），发送方可人工介入（见 2.5）或等待。
+进度流是尽力而为的直播，不保证完整性；最终结论一律以 `task_result` 为准。
+
+### 2.5 会话输入 `session_input`（v1.1 新增）
+
+向执行器上活跃的交互会话注入输入（人工干预 / 中途追问）。发布到 `agent/{executor_id}/inbox`。
+
+```json
+{
+  "protocol_version": "1.0",
+  "type": "session_input",
+  "sender_id": "agent_alpha",
+  "target_id": "codebuddy_tui1",
+  "session_id": "agentbus_codebuddy_tui1",
+  "text": "补充信息：路径改为 /data 下",
+  "special": null,
+  "ts": 1773400030.0
+}
+```
+
+`text`：字面文本（paste-buffer 注入）；`special`：tmux 键名（`Enter` / `C-c` / `Esc` 等），两者可同时给。
+
+### 2.6 任务取消 `task_cancel`
+
+请求执行方取消指定任务。发布到 `agent/{executor_id}/inbox`。
+执行方应优雅中断（交互式执行器: C-c → 宽限 → 会话重置），并回 `task_result` 且 `status="cancelled"`。
+
+```json
+{
+  "protocol_version": "1.0",
+  "type": "task_cancel",
+  "sender_id": "agent_alpha",
+  "target_id": "codebuddy_tui1",
+  "task_id": "uuid4",
+  "reason": "需求变更",
+  "ts": 1773400040.0
+}
+```
+
+`task_result.status` 枚举相应扩展为 `success | error | timeout | cancelled`。
+
 ## 3. 在线状态判定
 
 1. 心跳：`bus/heartbeat/{agent_id}` 每 30s 一次，服务端刷新 `last_seen`。

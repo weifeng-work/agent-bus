@@ -216,6 +216,8 @@ class OpenCodeExecutor:
             executor="opencode_cli" if not args.mock else "mock",
             config=cfg,
         )
+        # opencode 无需登录即可使用，健康态恒为 ok
+        self.bus.health = "ok" if not args.mock else "unknown"
 
     # ---------- 任务执行 ----------
 
@@ -262,15 +264,15 @@ class OpenCodeExecutor:
             artifacts=[], session_id=session_id,
         )
 
-    def _make_cmd(self, prompt: str, session_id, local_files) -> list:
-        """构造 opencode 命令行（argv 列表传参，prompt 独立元素，避免 shell 拼接）。"""
+    def _make_cmd(self, session_id, local_files) -> list:
+        """构造 opencode 命令行。prompt 不走 argv：opencode run 会把 argv prompt
+        截断在第一个换行符（实测 argv 只送达首行，stdin 完整送达），统一走 stdin。"""
         cmd = [self.oc_path, "run"]
         if session_id:
             cmd += ["--session", str(session_id)]
         cmd += ["--format", "json", "--auto"]
         for f in local_files:
             cmd += ["-f", str(f)]
-        cmd.append(prompt)
         return cmd
 
     def _spawn_env(self) -> dict:
@@ -282,12 +284,12 @@ class OpenCodeExecutor:
 
     def _run_opencode(self, prompt: str, session_id, timeout: int, cwd: Path,
                       local_files: list):
-        cmd = self._make_cmd(prompt, session_id, local_files)
+        cmd = self._make_cmd(session_id, local_files)
         if session_id:
             log.info("延续会话 %s", session_id)
         try:
             proc = subprocess.run(
-                cmd, cwd=str(cwd), capture_output=True, text=True,
+                cmd, cwd=str(cwd), input=prompt, capture_output=True, text=True,
                 encoding="utf-8", errors="replace", timeout=timeout,
                 env=self._spawn_env(),
             )
@@ -315,7 +317,7 @@ class OpenCodeExecutor:
         """前台 live 模式：text 事件实时打印到终端（给旁观者看），
         同时收集全部事件用于解析正文/sessionID。
         """
-        cmd = self._make_cmd(prompt, session_id, local_files)
+        cmd = self._make_cmd(session_id, local_files)
 
         # ── 任务信封：在终端打印任务来源，让旁观者看懂发生了什么 ──
         print("\n" + "=" * 60, flush=True)
@@ -332,10 +334,13 @@ class OpenCodeExecutor:
 
         try:
             proc = subprocess.Popen(
-                cmd, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, encoding="utf-8", errors="replace",
+                cmd, cwd=str(cwd), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
                 bufsize=1, env=self._spawn_env(),
             )
+            # prompt 走 stdin（argv 会在首个换行处被 opencode 截断，见 _make_cmd 注释）
+            proc.stdin.write(prompt)
+            proc.stdin.close()
             for line in proc.stdout:
                 collected.append(line)
                 s = line.strip()
