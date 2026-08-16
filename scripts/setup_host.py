@@ -228,15 +228,10 @@ def shutil_which(name):
 
 def write_broker_conf(port: int) -> Path:
     conf = RUNTIME / "mosquitto.conf"
-    auth = provision.auth_dir()
-    # 路径用正斜杠（mosquitto Windows/Linux 通吃），auth 目录由 provision 解析
-    passwd = (auth / "passwd").as_posix()
-    acl = (auth / "acl").as_posix()
+    # 匿名直连：不启用 password_file/acl（凭据逻辑已移除，先跑通功能）
     conf.write_text(
         f"listener {port} 0.0.0.0\n"
-        f"allow_anonymous false\n"
-        f"password_file {passwd}\n"
-        f"acl_file {acl}\n",
+        f"allow_anonymous true\n",
         encoding="utf-8",
     )
     return conf
@@ -267,14 +262,13 @@ def start_broker(exe: str, port: int):
     raise RuntimeError("broker 启动后端口未就绪，查看 data/runtime/broker.log")
 
 
-def start_server(http_port: int, broker_port: int, creds: dict):
+def start_server(http_port: int, broker_port: int):
     if port_open(http_port):
         step(5, f"端口 {http_port} 已有 bus_server 在监听（复用）")
         return
     env = os.environ.copy()
     env.update({
         "BUS_BROKER_HOST": "127.0.0.1", "BUS_BROKER_PORT": str(broker_port),
-        "BUS_MQTT_USER": creds["mqtt_user"], "BUS_MQTT_PASS": creds["mqtt_pass"],
         "BUS_HTTP_BASE": f"http://{provision.get_local_ip()}:{http_port}",
     })
     proc = subprocess.Popen(
@@ -310,29 +304,14 @@ def main():
     is_win = _platform.system() == "Windows"
     exe = ensure_broker_win(args.broker_port) if is_win else ensure_broker_linux(args.broker_port)
 
-    # 4. 桥接账号 + 管理员令牌（幂等：已有 bridge 凭据则复用）
-    cred = provision.CredStore()
-    bridge = cred.data["nodes"].get(provision.BRIDGE_USER)
-    if not bridge:
-        pw = provision.gen_password(32)
-        provision.set_mqtt_password(provision.auth_dir() / "passwd", provision.BRIDGE_USER, pw)
-        token = provision.gen_token()
-        cred.save_node(provision.BRIDGE_USER, pw, token, role="bridge")
-        bridge = {"mqtt_user": provision.BRIDGE_USER, "mqtt_pass": pw}
-        step(4, "已初始化桥接账号 + 管理员令牌")
-
-    else:
-        step(4, "桥接账号已存在（复用）")
-
+    # 4. 启动 broker + bus_server（匿名直连，无凭据）
     start_broker(exe, args.broker_port)
-    start_server(args.http_port, args.broker_port, bridge)
+    start_server(args.http_port, args.broker_port)
 
-    admin_token = cred.data["nodes"][provision.BRIDGE_USER]["http_token"]
     panel = f"http://127.0.0.1:{args.http_port}/"
     print("\n== 完成 ==")
-    print(f"  面板: {panel} （首次进入设定队伍名+加入口令）")
-    print(f"  管理员令牌（面板登录）: {admin_token}")
-    print(f"  子设备加入: 在目标机运行 python scripts/join_team.py")
+    print(f"  面板: {panel} （首次进入设定队伍名称即开始广播）")
+    print(f"  子设备加入: 在目标机运行 python scripts/join_team.py（匿名，无需口令）")
     if not args.no_browser:
         import webbrowser
         webbrowser.open(panel)

@@ -69,40 +69,20 @@
 </style>
 </head>
 <body>
-<div id="login" style="display:none;position:fixed;inset:0;background:rgba(13,17,23,.92);z-index:99;align-items:center;justify-content:center;">
-  <div style="max-width:420px;padding:32px;background:#161b22;border:1px solid #30363d;border-radius:12px;text-align:center;">
-    <div style="font-size:18px;font-weight:600;color:#e6edf3;margin-bottom:8px;">访问令牌</div>
-    <div style="font-size:12px;color:#8b949e;margin-bottom:16px;">面板已启用认证。令牌由 broker 侧 scripts/add_node.py 发放（管理员令牌可看全部）。</div>
-    <input id="tokenInput" type="password" placeholder="粘贴访问令牌"
-           style="width:100%;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#e6edf3;box-sizing:border-box;">
-    <button onclick="saveToken()" style="margin-top:12px;width:100%;padding:10px;background:#238636;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;">进入面板</button>
-  </div>
-</div>
 <div id="wizard" style="display:none;position:fixed;inset:0;background:rgba(13,17,23,.95);z-index:100;align-items:center;justify-content:center;">
   <div style="max-width:440px;padding:32px;background:#161b22;border:1px solid #30363d;border-radius:12px;">
     <div style="font-size:19px;font-weight:600;color:#e6edf3;margin-bottom:6px;">创建你的队伍</div>
-    <div style="font-size:12px;color:#8b949e;margin-bottom:18px;">首次运行。设定队伍名称与加入口令——局域网内其他设备凭口令加入本队伍。</div>
+    <div style="font-size:12px;color:#8b949e;margin-bottom:18px;">首次运行。设定队伍名称——局域网内其他设备即可加入本队伍（无口令）。</div>
     <input id="wizTeamName" placeholder="队伍名称（如：Alpha 小队）"
            style="width:100%;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#e6edf3;box-sizing:border-box;margin-bottom:10px;">
-    <input id="wizPass" type="password" placeholder="加入口令（4-64 位，子设备加入时输入）"
-           style="width:100%;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#e6edf3;box-sizing:border-box;">
     <div id="wizErr" style="color:#f85149;font-size:12px;margin-top:8px;min-height:16px;"></div>
     <button onclick="doSetup()" style="margin-top:10px;width:100%;padding:10px;background:#238636;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;">创建队伍并开始广播</button>
-  </div>
-</div>
-<div id="passModal" style="display:none;position:fixed;inset:0;background:rgba(13,17,23,.9);z-index:101;align-items:center;justify-content:center;">
-  <div style="max-width:420px;padding:28px;background:#161b22;border:1px solid #30363d;border-radius:12px;text-align:center;">
-    <div style="font-size:15px;font-weight:600;color:#e6edf3;margin-bottom:6px;">新的加入口令</div>
-    <div style="font-size:12px;color:#8b949e;margin-bottom:14px;">仅在册设备不受影响。告知要加入的新设备：</div>
-    <div id="passValue" style="font-size:30px;font-weight:700;color:#58a6ff;letter-spacing:6px;font-family:monospace;margin-bottom:16px;"></div>
-    <button onclick="document.getElementById('passModal').style.display='none'" style="padding:8px 22px;background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:8px;cursor:pointer;">我记下了</button>
   </div>
 </div>
 <header>
   <div class="dot" id="conn"></div>
   <h1>Agent Bus 控制面板</h1>
   <span id="teamBadge" style="display:none;font-size:12px;padding:2px 10px;border-radius:999px;background:#eef0ff;color:var(--brand);font-weight:600;"></span>
-  <button id="passBtn" onclick="regenPass()" style="display:none;margin-left:8px;font-size:12px;padding:3px 12px;border-radius:999px;border:1px solid var(--border);background:var(--card);cursor:pointer;color:var(--muted);">重新生成口令</button>
   <span id="status">连接中…</span>
 </header>
 <main>
@@ -287,28 +267,15 @@ document.getElementById("agents").addEventListener("click", e => {
     });
 });
 
-// 重新生成加入口令（仅 admin/bridge 角色）
-function regenPass() {
-  busFetch("/api/admin/passphrase", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
-    .then(async r => {
-      if (r.status === 403) { alert("需要管理员令牌（当前令牌 role=node）"); return; }
-      if (!r.ok) { alert("失败: " + (await r.text())); return; }
-      const j = await r.json();
-      document.getElementById("passValue").textContent = j.passphrase;
-      document.getElementById("passModal").style.display = "flex";
-    });
-}
-
 // 首次向导
 async function doSetup() {
   const name = document.getElementById("wizTeamName").value.trim();
-  const pass = document.getElementById("wizPass").value;
   const err = document.getElementById("wizErr");
   err.textContent = "";
   try {
     const r = await fetch("/api/team/setup", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ team_name: name, passphrase: pass }),
+      body: JSON.stringify({ team_name: name }),
     });
     if (!r.ok) { err.textContent = (await r.json()).detail || "创建失败"; return; }
     document.getElementById("wizard").style.display = "none";
@@ -349,37 +316,26 @@ function renderAgents(agents) {
 }
 
 function busFetch(url, opts) {
-  opts = opts || {};
-  opts.headers = Object.assign({}, opts.headers,
-    localStorage.busToken ? { "Authorization": "Bearer " + localStorage.busToken } : {});
   return fetch(url, opts);
-}
-function saveToken() {
-  const t = document.getElementById("tokenInput").value.trim();
-  if (!t) return;
-  localStorage.busToken = t;
-  load();
 }
 
 async function load() {
   try {
     const [agents, msgs, files] = await Promise.all([
-      busFetch("/api/agents").then(r => { if (r.status === 401) throw "AUTH"; return r.json(); }),
+      busFetch("/api/agents").then(r => r.json()),
       busFetch("/api/messages?limit=100").then(r => r.json()),
       busFetch("/api/files").then(r => r.json()),
     ]);
     lastMsgs = msgs;
-    document.getElementById("login").style.display = "none";
     document.getElementById("conn").classList.remove("off");
     document.getElementById("status").textContent =
       `${agents.filter(a => a.online).length}/${agents.length} 在线 · ${msgs.length} 条消息 · ${files.length} 个文件`;
 
-    // 队伍徽标 + 口令管理（登录成功后展示）
+    // 队伍徽标
     const badge = document.getElementById("teamBadge");
     if (teamNameCache) {
       badge.textContent = "队伍 · " + teamNameCache;
       badge.style.display = "inline-block";
-      document.getElementById("passBtn").style.display = "inline-block";
     }
 
     renderAgents(agents);
@@ -387,17 +343,12 @@ async function load() {
     renderMessages(msgs);
 
     document.getElementById("files").innerHTML = files.map(f => `
-      <tr><td><a href="${esc(f.url)}?token=${encodeURIComponent(localStorage.busToken || "")}" target="_blank">${esc(f.name)}</a></td><td class="muted">${(f.size / 1024).toFixed(1)} KB</td>
+      <tr><td><a href="${esc(f.url)}" target="_blank">${esc(f.name)}</a></td><td class="muted">${(f.size / 1024).toFixed(1)} KB</td>
       <td>${esc(f.uploaded_by || "-")}</td><td class="muted">${fmt(f.ts)}</td>
       <td class="muted">${esc(f.file_id)}</td></tr>`).join("") || '<tr><td colspan="5" class="muted">暂无文件</td></tr>';
   } catch (e) {
-    if (e === "AUTH") {
-      document.getElementById("login").style.display = "flex";
-      document.getElementById("status").textContent = "需要访问令牌";
-    } else {
-      document.getElementById("conn").classList.add("off");
-      document.getElementById("status").textContent = "服务不可达";
-    }
+    document.getElementById("conn").classList.add("off");
+    document.getElementById("status").textContent = "服务不可达";
   }
 }
 

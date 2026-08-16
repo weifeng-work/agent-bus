@@ -1,4 +1,4 @@
-"""子设备一键加入队伍：发现主机 → 输口令 → 拿凭据 → 验证上线。
+"""子设备一键加入队伍：发现主机 → 保存配置 → 验证上线（匿名直连，无凭据）。
 
 一句提示词流程（子设备）:
   python scripts/join_team.py                    # 自动发现 + 交互选择
@@ -6,15 +6,14 @@
 
 做了什么:
   1. 扫描局域网 beacon（5 秒；多队伍列出供选择；AP 隔离时可 --host 指定）
-  2. 输入队伍口令 → POST /api/join 核对 → 服务端自动发凭据（并自动重启用户态 broker）
-  3. 凭据写入 ~/.config/agent-bus/bus.env（Windows 同时 setx 持久化用户环境变量）
+  2. POST /api/join 登记入队（broker 已匿名，无口令/凭据）
+  3. 配置写入 ~/.config/agent-bus/bus.env（Windows 同时 setx 持久化用户环境变量）
   4. 设备身份存 ~/.config/agent-bus/device.json（agent_id 稳定，重跑即重新加入/重置）
   5. 立即连 MQTT 注册验证 → 主机面板可见本机在线
 
 之后启动任意执行器（自动读 bus.env）:  python executor/codebuddy_executor.py --agent-id <id> ...
 """
 import argparse
-import getpass
 import json
 import os
 import platform as _platform
@@ -24,6 +23,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+import urllib.error
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -50,13 +50,11 @@ def load_or_create_device() -> dict:
 
 
 def save_env(creds: dict):
+    # 匿名直连：仅保存 broker 地址与设备身份，无凭据
     lines = [
         f"BUS_BROKER_HOST={creds['broker_host']}",
         f"BUS_BROKER_PORT={creds.get('broker_port', 1883)}",
         f"BUS_HTTP_BASE=http://{creds['broker_host']}:{creds.get('http_port', 8000)}",
-        f"BUS_MQTT_USER={creds['mqtt_user']}",
-        f"BUS_MQTT_PASS={creds['mqtt_pass']}",
-        f"BUS_HTTP_TOKEN={creds['http_token']}",
     ]
     ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
     if os.name == "nt":
@@ -122,7 +120,7 @@ def join_http(base: str, body: dict) -> dict:
 
 
 def verify_online(creds: dict, agent_id: str):
-    """立即连 MQTT 注册（面板可见）——服务模式 broker 重启前凭据未生效则重试。"""
+    """立即连 MQTT 注册（面板可见），匿名直连。"""
     from agent_bus import AgentBus, BusConfig
     deadline = time.time() + 60
     last_err = None
@@ -130,8 +128,7 @@ def verify_online(creds: dict, agent_id: str):
         try:
             cfg = BusConfig(
                 broker_host=creds["broker_host"], broker_port=creds.get("broker_port", 1883),
-                agent_id=agent_id, mqtt_user=creds["mqtt_user"],
-                mqtt_pass=creds["mqtt_pass"], http_token=creds["http_token"],
+                agent_id=agent_id,
             )
             bus = AgentBus(agent_id, name=creds.get("device_name") or agent_id, config=cfg)
             bus.connect()
@@ -140,7 +137,7 @@ def verify_online(creds: dict, agent_id: str):
         except ConnectionError as e:
             last_err = e
             time.sleep(3)
-    print(f"警告: 凭据尚未生效（{last_err}）——若主机为服务模式需管理员重启 broker")
+    print(f"警告: 无法连接 broker（{last_err}）——检查主机可达性 {creds['broker_host']}:{creds.get('broker_port', 1883)}")
     return False
 
 
@@ -149,7 +146,6 @@ def main():
     ap.add_argument("--host", help="手动指定主机 IP（广播不可达时）")
     ap.add_argument("--http-port", type=int, default=8000)
     ap.add_argument("--mqtt-port", type=int, default=1883)
-    ap.add_argument("--passphrase", help="队伍口令（非交互模式传入；省略则运行时提示输入）")
     ap.add_argument("--name", help="设备显示名（默认 <系统>@<主机名>）")
     args = ap.parse_args()
 
@@ -173,15 +169,10 @@ def main():
     team["host_ip"] = pick_alive_ip(team)  # 连通性自检（发现≠连通）
 
     print(f"  设备身份: {agent_id}（{device_name}）")
-    passphrase = args.passphrase
-    if not passphrase:
-        passphrase = getpass.getpass(f"  输入队伍 [{team['team_name']}] 的加入口令: ")
-    elif not (4 <= len(passphrase) <= 64):
-        sys.exit("口令长度需 4-64")
 
     base = f"http://{team['host_ip']}:{team['http_port']}"
     creds = join_http(base, {
-        "passphrase": passphrase, "agent_id": agent_id,
+        "agent_id": agent_id,
         "device_name": device_name, "platform": _platform.system().lower(),
     })
 
@@ -190,9 +181,7 @@ def main():
                   "http_port": http_port, "device_name": device_name})
     save_env(creds)
 
-    print(f"  已加入队伍 [{creds['team_name']}]，凭据写入 {ENV_FILE}")
-    if not creds.get("broker_restarted", False):
-        print(f"  注意: {creds.get('broker_message', 'broker 需重启生效')}")
+    print(f"  已加入队伍 [{creds['team_name']}]，配置写入 {ENV_FILE}")
 
     print("  验证上线...")
     if verify_online(creds, agent_id):
