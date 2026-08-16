@@ -171,6 +171,22 @@ def _assistant_texts(events) -> str:
     return "\n".join(p for p in parts if p)
 
 
+def _stdout_truncated(stdout: str) -> bool:
+    """CodeBuddy stdout 是否为未闭合的 JSON 会话数组。
+
+    诱因（实测 Debian/mihomo TUN 环境）：API 流式响应被代理链路中断时，
+    CLI 只写出部分会话数组就以 exit 0 结束（实测截断点 65536 字节整）。
+    """
+    s = (stdout or "").strip()
+    if not s.startswith("["):
+        return False
+    try:
+        json.loads(s)
+        return False
+    except ValueError:
+        return True
+
+
 def _result_to_text(val) -> str:
     """result 事件正文字段 → 纯文本。
 
@@ -323,30 +339,51 @@ class CodeBuddyExecutor:
             artifacts=[], session_id=session_id,
         )
 
-    def _run_codebuddy(self, prompt: str, session_id, timeout: int, cwd: Path,
-                       task_dir: Path = None):
+    def _invoke_codebuddy(self, prompt: str, session_id, timeout: int, cwd: Path):
         cmd = [self.cb_path, "-p"]
         if session_id:
             cmd += ["--resume", str(session_id)]
-            log.info("延续会话 %s", session_id)
         cmd += ["--output-format", "json", "-y", prompt]
         try:
-            proc = subprocess.run(
+            return subprocess.run(
                 cmd, cwd=str(cwd), capture_output=True, text=True,
                 encoding="utf-8", errors="replace", timeout=timeout,
             )
         except subprocess.TimeoutExpired:
-            return "", None, "timeout", f"CodeBuddy 执行超时（>{timeout}s），进程已终止"
+            return "timeout"
         except Exception as e:
-            return "", None, "error", f"拉起 CodeBuddy 失败: {e}"
+            return f"spawn-failed: {e}"
 
-        # 原始输出落盘（排障证据：解析器对不上版本格式时，可事后分析真实结构）
-        if task_dir is not None:
-            try:
-                (task_dir / "stdout_raw.json").write_text(proc.stdout or "", encoding="utf-8")
-                (task_dir / "stderr_raw.txt").write_text(proc.stderr or "", encoding="utf-8")
-            except OSError as e:
-                log.warning("原始输出落盘失败: %s", e)
+    def _run_codebuddy(self, prompt: str, session_id, timeout: int, cwd: Path,
+                       task_dir: Path = None):
+        proc = None
+        for attempt in (1, 2):  # 输出截断（代理链路中断）自动重试一次
+            r = self._invoke_codebuddy(prompt, session_id if attempt == 1 else None,
+                                       timeout, cwd)
+            if isinstance(r, str):
+                if r == "timeout":
+                    return "", None, "timeout", f"CodeBuddy 执行超时（>{timeout}s），进程已终止"
+                return "", None, "error", f"拉起 CodeBuddy 失败: {r}"
+            proc = r
+            # 原始输出落盘（排障证据：解析器对不上版本格式时，可事后分析真实结构）
+            if task_dir is not None:
+                try:
+                    suffix = "" if attempt == 1 else f".retry{attempt}"
+                    (task_dir / f"stdout_raw{suffix}.json").write_text(
+                        proc.stdout or "", encoding="utf-8")
+                    (task_dir / f"stderr_raw{suffix}.txt").write_text(
+                        proc.stderr or "", encoding="utf-8")
+                except OSError as e:
+                    log.warning("原始输出落盘失败: %s", e)
+            if not _stdout_truncated(proc.stdout or ""):
+                break
+            log.warning("stdout JSON 未闭合（attempt %s，疑似代理链路中断截断），%s",
+                        attempt, "重试一次" if attempt == 1 else "两次均截断")
+        else:
+            return ("", None, "error",
+                    "CodeBuddy 输出被截断（stdout JSON 未闭合，实测诱因：代理/TUN "
+                    "链路中断 API 流式响应，CLI 以 exit 0 结束）。请重发任务，或在"
+                    "该机器上让 CodeBuddy 的 API 流量绕过代理")
 
         data = extract_json(proc.stdout or "")
         output, session = parse_codebuddy_output(proc.stdout or "")
@@ -357,7 +394,7 @@ class CodeBuddyExecutor:
         # stdout 非 JSON：退回原始文本
         raw = (proc.stdout or proc.stderr or "").strip()
         if proc.stdout and proc.stdout.lstrip().startswith("[") and len(raw) > OUTPUT_LIMIT:
-            # 疑似未闭合会话数组：结论在尾部（assistant/result），头部是 user 上下文噪音
+            # 未闭合会话数组：结论在尾部（assistant/result），头部是 user 上下文噪音
             raw = "...(前略)...\n" + raw[-(OUTPUT_LIMIT - 15):]
         return raw[:OUTPUT_LIMIT], None, ("success" if proc.returncode == 0 else "error"), \
                None if proc.returncode == 0 else f"exit_code={proc.returncode}"
