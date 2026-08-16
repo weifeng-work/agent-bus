@@ -72,7 +72,14 @@ def ensure_deps():
                if not _try_import(mod, importlib)]
     if missing:
         step(1, f"安装依赖: {', '.join(missing)}")
-        subprocess.run([sys.executable, "-m", "pip", "install", *missing], check=True)
+        r = subprocess.run([sys.executable, "-m", "pip", "install", *missing])
+        if r.returncode != 0:
+            # Debian 12+ PEP 668: 裸 pip install 报 externally-managed-environment
+            # → --user --break-system-packages（装 ~/.local，与 apt 系统包共存，实测可行）
+            step(1, "默认 pip 受 PEP 668 限制，改用 --user --break-system-packages")
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--user",
+                 "--break-system-packages", *missing], check=True)
 
 
 def _try_import(mod, importlib):
@@ -209,7 +216,14 @@ def ensure_broker_linux(port: int) -> str:
 
 def shutil_which(name):
     import shutil
-    return shutil.which(name)
+    exe = shutil.which(name)
+    if exe:
+        return exe
+    # Debian: apt 装的 mosquitto 二进制在 /usr/sbin，普通用户 PATH 不含 sbin
+    for cand in (f"/usr/sbin/{name}", f"/usr/local/sbin/{name}"):
+        if Path(cand).exists():
+            return cand
+    return None
 
 
 def write_broker_conf(port: int) -> Path:
