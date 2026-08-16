@@ -69,6 +69,10 @@ class Store:
                     file_id TEXT PRIMARY KEY, name TEXT, size INTEGER,
                     uploaded_by TEXT, ts REAL
                 );
+                CREATE TABLE IF NOT EXISTS http_tokens(
+                    token TEXT PRIMARY KEY, agent_id TEXT,
+                    role TEXT DEFAULT 'node', created_at REAL
+                );
                 """
             )
             # 增量迁移：为旧库补 hostname 列（已存在则忽略）
@@ -180,15 +184,32 @@ class Store:
         rows = self.execute("SELECT * FROM files WHERE file_id=?", (file_id,), fetch=True)
         return dict(rows[0]) if rows else None
 
+    # ---- http tokens ----
+
+    def add_token(self, token: str, agent_id: str, role: str = "node"):
+        self.execute(
+            "INSERT OR REPLACE INTO http_tokens(token,agent_id,role,created_at) VALUES(?,?,?,?)",
+            (token, agent_id, role, time.time()),
+        )
+
+    def check_token(self, token: str):
+        rows = self.execute(
+            "SELECT agent_id, role FROM http_tokens WHERE token=?", (token,), fetch=True
+        )
+        return dict(rows[0]) if rows else None
+
 
 # ---------------------------------------------------------------------------
 # MQTT 桥
 # ---------------------------------------------------------------------------
 
 class MqttBridge:
-    def __init__(self, store: Store, broker_host: str, broker_port: int):
+    def __init__(self, store: Store, broker_host: str, broker_port: int,
+                 username: str = "", password: str = ""):
         self.store = store
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="bus-server-bridge")
+        if username:
+            self.client.username_pw_set(username, password)
         self.client.on_connect = self._on_connect
         self.client.on_message = self._on_message
         self.broker_host, self.broker_port = broker_host, broker_port
@@ -234,25 +255,49 @@ class MqttBridge:
 # FastAPI 应用
 # ---------------------------------------------------------------------------
 
-def create_app(store: Store, files_dir: Path, bridge: MqttBridge) -> FastAPI:
+def create_app(store: Store, files_dir: Path, bridge: MqttBridge,
+               auth_enabled: bool = True) -> FastAPI:
     app = FastAPI(title="Agent Bus Server")
     files_dir.mkdir(parents=True, exist_ok=True)
 
+    from fastapi import Depends, Header
+    from fastapi.security.utils import get_authorization_scheme_param
+
+    def require_token(authorization: str = Header(None), token: str = Query(None)):
+        """API 令牌认证：Authorization: Bearer <token> 或 ?token=（供浏览器下载链接）。
+        未启用认证（auth_enabled=False，如初始化前）时直接放行。"""
+        if not auth_enabled:
+            return {"agent_id": "", "role": "anonymous"}
+        tok = None
+        if authorization:
+            scheme, param = get_authorization_scheme_param(authorization)
+            if scheme.lower() == "bearer":
+                tok = param
+        tok = tok or token
+        if not tok:
+            raise HTTPException(401, "missing token")
+        ident = store.check_token(tok)
+        if not ident:
+            raise HTTPException(401, "invalid token")
+        return ident
+
     @app.get("/api/health")
     def health():
-        return {"ok": True, "agents": len(store.list_agents())}
+        # 开放端点（发现/连通性探测用），不泄露任何业务信息
+        return {"ok": True}
 
     @app.get("/api/agents")
-    def agents():
+    def agents(ident: dict = Depends(require_token)):
         return store.list_agents()
 
     @app.get("/api/messages")
     def messages(limit: int = Query(100, ge=1, le=1000),
-                 agent_id: str = None, keyword: str = None):
+                 agent_id: str = None, keyword: str = None,
+                 ident: dict = Depends(require_token)):
         return store.list_messages(limit, agent_id, keyword)
 
     @app.get("/api/files")
-    def files_list():
+    def files_list(ident: dict = Depends(require_token)):
         base = os.environ.get("BUS_HTTP_BASE", "").rstrip("/")
         out = []
         for f in store.list_files():
@@ -261,7 +306,8 @@ def create_app(store: Store, files_dir: Path, bridge: MqttBridge) -> FastAPI:
         return out
 
     @app.post("/api/files/upload")
-    async def upload(file: UploadFile = File(...), uploaded_by: str = ""):
+    async def upload(file: UploadFile = File(...), uploaded_by: str = "",
+                     ident: dict = Depends(require_token)):
         file_id = uuid.uuid4().hex[:12]
         dest = files_dir / f"{file_id}_{Path(file.filename or 'unnamed').name}"
         size = 0
@@ -276,7 +322,7 @@ def create_app(store: Store, files_dir: Path, bridge: MqttBridge) -> FastAPI:
         return {"file_id": file_id, "name": file.filename, "size": size, "url": url}
 
     @app.get("/api/files/{file_id}")
-    def download(file_id: str):
+    def download(file_id: str, ident: dict = Depends(require_token)):
         meta = store.get_file(file_id)
         if not meta:
             raise HTTPException(404, "file not found")
@@ -301,6 +347,10 @@ def main():
     parser.add_argument("--broker-port", type=int, default=int(os.environ.get("BUS_BROKER_PORT", "1883")))
     parser.add_argument("--db", default=str(ROOT_DIR / "data" / "bus.db"))
     parser.add_argument("--files-dir", default=str(ROOT_DIR / "data" / "files"))
+    parser.add_argument("--mqtt-user", default=os.environ.get("BUS_MQTT_USER", ""))
+    parser.add_argument("--mqtt-pass", default=os.environ.get("BUS_MQTT_PASS", ""))
+    parser.add_argument("--no-api-auth", action="store_true",
+                        help="禁用 HTTP API 令牌认证（仅初始化/排障用）")
     args = parser.parse_args()
 
     # 面板/消息里展示的绝对 URL 基址（默认用本机回环，局域网部署时设置环境变量）
@@ -308,9 +358,10 @@ def main():
         os.environ["BUS_HTTP_BASE"] = f"http://127.0.0.1:{args.port}"
 
     store = Store(Path(args.db))
-    bridge = MqttBridge(store, args.broker_host, args.broker_port)
+    bridge = MqttBridge(store, args.broker_host, args.broker_port,
+                        username=args.mqtt_user, password=args.mqtt_pass)
     bridge.start()
-    app = create_app(store, Path(args.files_dir), bridge)
+    app = create_app(store, Path(args.files_dir), bridge, auth_enabled=not args.no_api_auth)
     log.info("Agent Bus Server 启动: http://%s:%d (面板在 /)", args.host, args.port)
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 

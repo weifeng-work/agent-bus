@@ -21,25 +21,22 @@
   #status { color: var(--muted); font-size: 12px; margin-left: auto; }
   main { max-width: 1100px; margin: 0 auto; padding: 20px 24px 60px; }
   h2 { font-size: 14px; color: var(--muted); font-weight: 600; margin: 24px 0 10px; }
-  .agents { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
-  .agent { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
-  .agent .name { font-weight: 600; display: flex; align-items: center; gap: 8px; }
-  .agent .meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
-  .badge { font-size: 11px; padding: 1px 8px; border-radius: 999px; margin-left: auto; }
-  .badge.on { background: #e7f9f1; color: #0d8f5f; }
-  .badge.off { background: #f1f2f4; color: var(--muted); }
-  /* 机器分组：组头标系统+主机名，组内 CLI/GUI 分栏 */
-  .host-group { margin-bottom: 16px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--card); }
-  .host-header { display: flex; align-items: center; gap: 10px; padding: 9px 14px;
+  /* 机器分组：组头标系统+主机名，组内智能体横向 chip 流（多机多节点不再拉长页面） */
+  .host-group { margin-bottom: 12px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--card); }
+  .host-header { display: flex; align-items: center; gap: 10px; padding: 8px 14px;
                  background: #eef0f7; border-bottom: 1px solid var(--border); font-weight: 600; font-size: 13px; }
   .host-header .os-tag { font-size: 11px; padding: 2px 9px; border-radius: 999px; background: var(--brand); color: #fff; font-weight: 600; }
   .host-header .host-count { margin-left: auto; font-size: 11px; color: var(--muted); font-weight: 500; }
-  .host-section { padding: 10px 14px; }
-  .host-section + .host-section { border-top: 1px dashed var(--border); }
-  .sec-label { font-size: 11px; color: var(--muted); font-weight: 700; margin: 0 0 8px; letter-spacing: .5px; }
-  .sec-label.cli { color: #4b3fe3; }
-  .sec-label.gui { color: #0d8f5f; }
-  .host-section .agents { gap: 10px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 14px; }
+  .chip { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--border);
+          border-radius: 999px; padding: 3px 12px; background: var(--card); font-size: 13px;
+          white-space: nowrap; max-width: 100%; }
+  .chip.offline { opacity: .55; }
+  .chip .exe { color: var(--muted); font-size: 11px;
+               font-family: "SF Mono", Consolas, monospace; }
+  .chip .tag { font-size: 10px; padding: 1px 7px; border-radius: 999px; font-weight: 600; }
+  .tag.gui { background: #e7f9f1; color: #0d8f5f; }
+  .tag.tui { background: #eef0ff; color: var(--brand); }
   table { width: 100%; border-collapse: collapse; background: var(--card);
           border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
   th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 13px; }
@@ -69,6 +66,15 @@
 </style>
 </head>
 <body>
+<div id="login" style="display:none;position:fixed;inset:0;background:rgba(13,17,23,.92);z-index:99;align-items:center;justify-content:center;">
+  <div style="max-width:420px;padding:32px;background:#161b22;border:1px solid #30363d;border-radius:12px;text-align:center;">
+    <div style="font-size:18px;font-weight:600;color:#e6edf3;margin-bottom:8px;">访问令牌</div>
+    <div style="font-size:12px;color:#8b949e;margin-bottom:16px;">面板已启用认证。令牌由 broker 侧 scripts/add_node.py 发放（管理员令牌可看全部）。</div>
+    <input id="tokenInput" type="password" placeholder="粘贴访问令牌"
+           style="width:100%;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#e6edf3;box-sizing:border-box;">
+    <button onclick="saveToken()" style="margin-top:12px;width:100%;padding:10px;background:#238636;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;">进入面板</button>
+  </div>
+</div>
 <header>
   <div class="dot" id="conn"></div>
   <h1>Agent Bus 控制面板</h1>
@@ -76,7 +82,7 @@
 </header>
 <main>
   <h2>已注册智能体</h2>
-  <div class="agents" id="agents"></div>
+  <div id="agents"></div>
 
   <h2>消息时间线（任务与结果配对显示）<span id="refresh">每 3 秒自动刷新 · 心跳不入库</span></h2>
   <table>
@@ -226,23 +232,26 @@ async function refreshMessages() {
 const OS_LABEL = { windows: "Windows", linux: "Linux", darwin: "macOS", macos: "macOS" };
 const isGui = a => /gui/i.test(a.executor || "");
 
-function agentCard(a) {
-  return `<div class="agent">
-    <div class="name"><span class="dot ${a.online ? "" : "off"}"></span>${esc(a.name)}
-      <span class="badge ${a.online ? "on" : "off"}">${a.online ? "在线" : "离线"}</span></div>
-    <div class="meta">${esc(a.agent_id)} · ${esc(a.executor || "sdk")}</div>
-  </div>`;
+// 智能体 chip：一行紧凑展示（名称 + TUI/GUI 标 + 执行器），悬浮见全量信息
+function agentChip(a) {
+  const exe = a.executor || "sdk";
+  const tag = isGui(a) ? `<span class="tag gui">GUI</span>`
+    : exe.startsWith("interactive_") ? `<span class="tag tui">TUI</span>` : "";
+  const exeShort = exe.replace(/^interactive_/, "");
+  return `<span class="chip ${a.online ? "" : "offline"}"
+    title="${esc(a.agent_id)} · ${esc(exe)}${a.online ? "" : " · 离线"}">
+    <span class="dot ${a.online ? "" : "off"}"></span>${esc(a.name)}${tag}
+    <span class="exe">${esc(exeShort)}</span></span>`;
 }
 
 function renderAgents(agents) {
-  // 一级按 hostname 分组（空则归 "_unknown"，避免不同机器混并）
+  // 按 hostname 分组（空则归 "_unknown"），组内 chip 横向流式排布
   const hostMap = new Map();
   for (const a of agents) {
     const host = a.hostname || "_unknown";
     if (!hostMap.has(host)) hostMap.set(host, []);
     hostMap.get(host).push(a);
   }
-  // 主机排序：先按 platform 再按 hostname，同类系统聚拢
   const hosts = [...hostMap.entries()].sort((a, b) => {
     const pa = a[1][0].platform || "zzz", pb = b[1][0].platform || "zzz";
     return pa !== pb ? (pa < pb ? -1 : 1) : (a[0] < b[0] ? -1 : 1);
@@ -253,32 +262,39 @@ function renderAgents(agents) {
     const osLabel = OS_LABEL[plat] || plat;
     const hostLabel = host === "_unknown" ? "未知主机" : host;
     const onlineN = list.filter(a => a.online).length;
-    const cli = list.filter(a => !isGui(a));
-    const gui = list.filter(a => isGui(a));
     html += `<div class="host-group">
       <div class="host-header">
         <span class="os-tag">${esc(osLabel)}</span><span>${esc(hostLabel)}</span>
         <span class="host-count">${onlineN}/${list.length} 在线</span>
-      </div>`;
-    for (const [label, cls, sub] of [["CLI", "cli", cli], ["GUI", "gui", gui]]) {
-      if (!sub.length) continue;
-      html += `<div class="host-section"><div class="sec-label ${cls}">${label}</div><div class="agents">`;
-      html += sub.map(agentCard).join("");
-      html += `</div></div>`;
-    }
-    html += `</div>`;
+      </div>
+      <div class="chips">${list.map(agentChip).join("")}</div>
+    </div>`;
   }
-  document.getElementById("agents").innerHTML = html || '<div class="meta">暂无注册节点</div>';
+  document.getElementById("agents").innerHTML = html || '<div class="exe">暂无注册节点</div>';
+}
+
+function busFetch(url, opts) {
+  opts = opts || {};
+  opts.headers = Object.assign({}, opts.headers,
+    localStorage.busToken ? { "Authorization": "Bearer " + localStorage.busToken } : {});
+  return fetch(url, opts);
+}
+function saveToken() {
+  const t = document.getElementById("tokenInput").value.trim();
+  if (!t) return;
+  localStorage.busToken = t;
+  load();
 }
 
 async function load() {
   try {
     const [agents, msgs, files] = await Promise.all([
-      fetch("/api/agents").then(r => r.json()),
-      fetch("/api/messages?limit=100").then(r => r.json()),
-      fetch("/api/files").then(r => r.json()),
+      busFetch("/api/agents").then(r => { if (r.status === 401) throw "AUTH"; return r.json(); }),
+      busFetch("/api/messages?limit=100").then(r => r.json()),
+      busFetch("/api/files").then(r => r.json()),
     ]);
     lastMsgs = msgs;
+    document.getElementById("login").style.display = "none";
     document.getElementById("conn").classList.remove("off");
     document.getElementById("status").textContent =
       `${agents.filter(a => a.online).length}/${agents.length} 在线 · ${msgs.length} 条消息 · ${files.length} 个文件`;
@@ -288,12 +304,17 @@ async function load() {
     renderMessages(msgs);
 
     document.getElementById("files").innerHTML = files.map(f => `
-      <tr><td>${esc(f.name)}</td><td class="muted">${(f.size / 1024).toFixed(1)} KB</td>
+      <tr><td><a href="${esc(f.url)}?token=${encodeURIComponent(localStorage.busToken || "")}" target="_blank">${esc(f.name)}</a></td><td class="muted">${(f.size / 1024).toFixed(1)} KB</td>
       <td>${esc(f.uploaded_by || "-")}</td><td class="muted">${fmt(f.ts)}</td>
       <td class="muted">${esc(f.file_id)}</td></tr>`).join("") || '<tr><td colspan="5" class="muted">暂无文件</td></tr>';
-  } catch {
-    document.getElementById("conn").classList.add("off");
-    document.getElementById("status").textContent = "服务不可达";
+  } catch (e) {
+    if (e === "AUTH") {
+      document.getElementById("login").style.display = "flex";
+      document.getElementById("status").textContent = "需要访问令牌";
+    } else {
+      document.getElementById("conn").classList.add("off");
+      document.getElementById("status").textContent = "服务不可达";
+    }
   }
 }
 load();

@@ -46,6 +46,8 @@ class AgentBus:
             mqtt.CallbackAPIVersion.VERSION2,
             client_id=f"bus-{agent_id}-{int(time.time())}",
         )
+        if self.cfg.mqtt_user:
+            self._client.username_pw_set(self.cfg.mqtt_user, self.cfg.mqtt_pass)
         self._client.on_connect = self._on_connect
         self._client.on_message = self._on_message
         self._connected = threading.Event()
@@ -192,13 +194,14 @@ class AgentBus:
     # ---------- 便捷封装（HTTP） ----------
 
     def list_agents(self) -> list:
-        return _files.list_agents_http(self.cfg.http_base)
+        return _files.list_agents_http(self.cfg.http_base, token=self.cfg.http_token)
 
     def upload(self, path: str) -> dict:
-        return _files.upload_file(path, self.cfg.http_base, uploaded_by=self.agent_id)
+        return _files.upload_file(path, self.cfg.http_base, uploaded_by=self.agent_id,
+                                  token=self.cfg.http_token)
 
     def download(self, url: str, dest: str) -> str:
-        return _files.download_file(url, dest, self.cfg.http_base)
+        return _files.download_file(url, dest, self.cfg.http_base, token=self.cfg.http_token)
 
 
 def _queue_get(q: queue.Queue, timeout: float):
