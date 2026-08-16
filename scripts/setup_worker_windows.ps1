@@ -60,6 +60,14 @@ Write-Host "  [1/5] Python 就绪: $py"
 
 # ---------- 2. 下载项目 ----------
 Write-Host "  [2/5] 下载 agent-bus..."
+# 先停在跑的旧执行器：进程 cwd 与日志重定向句柄会锁住 $InstallDir，导致覆盖更新失败
+Get-CimInstance Win32_Process -Filter "Name LIKE 'python%'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -match '_executor\.py|interactive_executor\.py' } |
+    ForEach-Object {
+        Write-Host "  停止旧执行器 PID $($_.ProcessId)" -ForegroundColor DarkGray
+        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+Start-Sleep 1
 if (Test-Path $InstallDir) { Remove-Item $InstallDir -Recurse -Force }
 $zip = "$env:TEMP\agent-bus.zip"
 $dl = $false

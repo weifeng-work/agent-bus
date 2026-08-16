@@ -350,10 +350,13 @@ class CodeBuddyExecutor:
         cmd = [self.cb_path, "-p"]
         if session_id:
             cmd += ["--resume", str(session_id)]
-        cmd += ["--output-format", "json", "-y", prompt]
+        cmd += ["--output-format", "json", "-y"]
+        # prompt 走 stdin：argv 传多行文本会被 CodeBuddy CLI 在首个换行处截断
+        # （本机实测 2026-08-17：argv 丢 banana / stdin 完整；与 opencode run 同款坑）
         try:
             with open(stdout_path, "wb") as so, open(stderr_path, "wb") as se:
                 return subprocess.run(cmd, cwd=str(cwd), stdout=so, stderr=se,
+                                      input=prompt.encode("utf-8"),
                                       timeout=timeout)
         except subprocess.TimeoutExpired:
             return "timeout"
@@ -415,7 +418,7 @@ class CodeBuddyExecutor:
         cmd = [self.cb_path, "-p"]
         if session_id:
             cmd += ["--resume", str(session_id)]
-        cmd += ["--output-format", "stream-json", "-y", prompt]
+        cmd += ["--output-format", "stream-json", "-y"]  # prompt 走 stdin（argv 多行截断）
 
         # ── 任务信封：在终端打印任务来源，让旁观者看懂发生了什么 ──
         print("\n" + "=" * 60, flush=True)
@@ -435,10 +438,13 @@ class CodeBuddyExecutor:
 
         try:
             proc = subprocess.Popen(
-                cmd, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                cmd, cwd=str(cwd), stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, encoding="utf-8", errors="replace",
                 bufsize=1,  # 行缓冲，配合 text=True 尽早吐出
             )
+            proc.stdin.write(prompt)   # 多行 prompt 经 stdin 注入（argv 会截断）
+            proc.stdin.close()
             # 逐行读取 stdout，实时打印 + 累积
             for line in proc.stdout:
                 collected_lines.append(line)
