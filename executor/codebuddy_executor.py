@@ -300,7 +300,8 @@ class CodeBuddyExecutor:
             output, session_id, status, error = self._run_codebuddy_live(
                 prompt, payload.get("session_id"), timeout, self.workdir, req)
         else:
-            output, session_id, status, error = self._run_codebuddy(prompt, payload.get("session_id"), timeout, self.workdir)
+            output, session_id, status, error = self._run_codebuddy(
+                prompt, payload.get("session_id"), timeout, self.workdir, task_dir)
 
         elapsed = round(time.time() - started, 2)
         log.info("任务 %s 完成 status=%s 耗时=%ss", task_id[:8], status, elapsed)
@@ -322,7 +323,8 @@ class CodeBuddyExecutor:
             artifacts=[], session_id=session_id,
         )
 
-    def _run_codebuddy(self, prompt: str, session_id, timeout: int, cwd: Path):
+    def _run_codebuddy(self, prompt: str, session_id, timeout: int, cwd: Path,
+                       task_dir: Path = None):
         cmd = [self.cb_path, "-p"]
         if session_id:
             cmd += ["--resume", str(session_id)]
@@ -338,6 +340,14 @@ class CodeBuddyExecutor:
         except Exception as e:
             return "", None, "error", f"拉起 CodeBuddy 失败: {e}"
 
+        # 原始输出落盘（排障证据：解析器对不上版本格式时，可事后分析真实结构）
+        if task_dir is not None:
+            try:
+                (task_dir / "stdout_raw.json").write_text(proc.stdout or "", encoding="utf-8")
+                (task_dir / "stderr_raw.txt").write_text(proc.stderr or "", encoding="utf-8")
+            except OSError as e:
+                log.warning("原始输出落盘失败: %s", e)
+
         data = extract_json(proc.stdout or "")
         output, session = parse_codebuddy_output(proc.stdout or "")
         if data is not None and output:
@@ -346,6 +356,9 @@ class CodeBuddyExecutor:
             return output, session, "success", None
         # stdout 非 JSON：退回原始文本
         raw = (proc.stdout or proc.stderr or "").strip()
+        if proc.stdout and proc.stdout.lstrip().startswith("[") and len(raw) > OUTPUT_LIMIT:
+            # 疑似未闭合会话数组：结论在尾部（assistant/result），头部是 user 上下文噪音
+            raw = "...(前略)...\n" + raw[-(OUTPUT_LIMIT - 15):]
         return raw[:OUTPUT_LIMIT], None, ("success" if proc.returncode == 0 else "error"), \
                None if proc.returncode == 0 else f"exit_code={proc.returncode}"
 
