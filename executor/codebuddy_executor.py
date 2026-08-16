@@ -32,6 +32,8 @@ from agent_bus.files import download_file  # noqa: E402
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("codebuddy_executor")
 
+OUTPUT_LIMIT = 20000  # 回传正文上限（审核报告类长文 4000 不够；MQTT 单消息可承载）
+
 PROMPT_TEMPLATE = """你正在参与一个跨机器多智能体协作系统，有任务需要你完成。
 
 【任务信封】(多智能体防串扰，请核对后再执行)
@@ -169,6 +171,37 @@ def _assistant_texts(events) -> str:
     return "\n".join(p for p in parts if p)
 
 
+def _result_to_text(val) -> str:
+    """result 事件正文字段 → 纯文本。
+
+    部分版本 CodeBuddy 把整段会话数组（含 user 消息里的 system-reminder 噪音）
+    序列化成 JSON 字符串塞进 result.result——必须解析后只取 assistant 文本，
+    否则截断后全是噪音、真正的回答永远露不出来。
+    """
+    if val is None:
+        return ""
+    if isinstance(val, str):
+        s = val.strip()
+        if s[:1] in "[{":
+            try:
+                return _result_to_text(json.loads(s))
+            except ValueError:
+                return s
+        return s
+    if isinstance(val, list):
+        parts = []
+        for item in val:
+            if isinstance(item, dict) and _is_assistant_event(item):
+                parts.extend(_extract_assistant_text(item))
+        return "\n".join(p for p in parts if p)
+    if isinstance(val, dict):
+        texts = _extract_assistant_text(val)
+        if texts:
+            return "\n".join(texts)
+        return _result_to_text(val.get("text") or val.get("output") or val.get("content"))
+    return str(val)
+
+
 def parse_codebuddy_output(text: str):
     """解析 CodeBuddy stdout，返回 (output_text, session_id)。"""
     data = extract_json(text)
@@ -185,12 +218,12 @@ def parse_codebuddy_output(text: str):
             (x for x in data if isinstance(x, dict) and x.get("type") == "result"), None
         )
         if result_elem:
-            output = result_elem.get("result") or _assistant_texts(data)
-            return output.strip(), session_id
+            output = _result_to_text(result_elem.get("result")) or _assistant_texts(data)
+            return output.strip()[:OUTPUT_LIMIT], session_id
         texts = _assistant_texts(data)
         if texts:
-            return texts, session_id
-    return (text or "").strip()[:4000], None
+            return texts[:OUTPUT_LIMIT], session_id
+    return (text or "").strip()[:OUTPUT_LIMIT], None
 
 
 def build_prompt(req: dict, workdir: Path, cli_path: Path) -> str:
@@ -309,11 +342,11 @@ class CodeBuddyExecutor:
         output, session = parse_codebuddy_output(proc.stdout or "")
         if data is not None and output:
             if proc.returncode != 0:
-                return (proc.stderr or output)[:4000], session, "error", f"exit_code={proc.returncode}"
+                return (proc.stderr or output)[:OUTPUT_LIMIT], session, "error", f"exit_code={proc.returncode}"
             return output, session, "success", None
         # stdout 非 JSON：退回原始文本
         raw = (proc.stdout or proc.stderr or "").strip()
-        return raw[:4000], None, ("success" if proc.returncode == 0 else "error"), \
+        return raw[:OUTPUT_LIMIT], None, ("success" if proc.returncode == 0 else "error"), \
                None if proc.returncode == 0 else f"exit_code={proc.returncode}"
 
     def _run_codebuddy_live(self, prompt: str, session_id, timeout: int,
@@ -380,7 +413,8 @@ class CodeBuddyExecutor:
                             assistant_printed = True
                 # result 事件 → 提取最终结论和 session_id
                 elif etype == "result":
-                    final_output = evt.get("result", "") or evt.get("output_text", "") or ""
+                    final_output = _result_to_text(
+                        evt.get("result") or evt.get("output_text") or "")
                     sid = evt.get("session_id") or evt.get("sessionId")
                     if sid:
                         final_session = sid
@@ -430,9 +464,9 @@ class CodeBuddyExecutor:
                 final_output = _assistant_texts(events)
 
         if proc.returncode != 0 and not final_output:
-            return (proc.stderr or "")[:4000], final_session, "error", \
+            return (proc.stderr or "")[:OUTPUT_LIMIT], final_session, "error", \
                    f"exit_code={proc.returncode}"
-        return final_output[:4000], final_session, "success", None
+        return final_output[:OUTPUT_LIMIT], final_session, "success", None
 
     def _run_mock(self, req: dict, local_files):
         time.sleep(0.3)

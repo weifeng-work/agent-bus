@@ -165,3 +165,35 @@ Agent 启动后发布到 `bus/register`（retain=true，新加入者可立即获
 2. 消息内只携带 `url`。
 3. 下载：`GET {url}`。
 4. 所有文件元数据入 SQLite，可在面板追溯。
+
+## 5. 队伍发现协议（UDP beacon，v1.2 新增）
+
+子设备加入队伍前的主机发现，走 UDP 广播而非 MQTT（加入前没有凭据）。
+
+### 5.1 beacon 报文
+
+主机侧（bus_server）队伍初始化后每 3 秒向 `255.255.255.255:41830` 广播，
+并按自报候选 IP 补发各网段定向广播（`a.b.c.255:41830`，防代理 TUN 劫持默认路由）：
+
+```json
+{
+  "proto": "agent-bus", "ver": 1,
+  "team_id": "160086f6d220", "team_name": "Alpha 小队",
+  "host_name": "DESKTOP-ABC",
+  "ips": ["192.168.31.186", "192.168.176.1"],
+  "mqtt_port": 1883, "http_port": 8000
+}
+```
+
+- `ips`：主机全部私网候选地址（多网卡/虚拟网卡/代理 TUN 场景无法给出唯一答案）
+- beacon 不含任何凭据；口令核对发生在 HTTP `POST /api/join`
+- 选广播而非组播：零配置；代价是 AP 隔离下不可达——保留 `--host` 手动回退
+
+### 5.2 加入流程（发现 ≠ 连通）
+
+1. 子设备 `scan_teams()` 绑定 41830 收集 beacon（按 team_id 去重，`host_ips` 取并集）
+2. **连通性自检**：逐候选探测 `http://{ip}:{http_port}/api/health`，选第一个可达 IP
+3. `POST /api/join`（口令）→ 服务端自动发凭据并重启用户态 broker
+4. 凭据落 `~/.config/agent-bus/bus.env`，立即连 MQTT 注册验证上线
+
+安全：`/api/join` 为唯一匿名业务端点，口令错误按 IP 计数（5 次锁 5 分钟）。
