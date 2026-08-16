@@ -339,16 +339,22 @@ class CodeBuddyExecutor:
             artifacts=[], session_id=session_id,
         )
 
-    def _invoke_codebuddy(self, prompt: str, session_id, timeout: int, cwd: Path):
+    def _invoke_codebuddy(self, prompt: str, session_id, timeout: int, cwd: Path,
+                          stdout_path: Path, stderr_path: Path):
+        """拉起 codebuddy，stdout/stderr 重定向到文件。
+
+        不用 capture_output 管道：实测 CodeBuddy CLI 向管道写超 64KB 输出时
+        确定性截断在 65536 字节（手动 shell 重定向文件则 325KB 完整）——
+        Node stdout 管道缓冲 drain bug，文件重定向天然绕开。
+        """
         cmd = [self.cb_path, "-p"]
         if session_id:
             cmd += ["--resume", str(session_id)]
         cmd += ["--output-format", "json", "-y", prompt]
         try:
-            return subprocess.run(
-                cmd, cwd=str(cwd), capture_output=True, text=True,
-                encoding="utf-8", errors="replace", timeout=timeout,
-            )
+            with open(stdout_path, "wb") as so, open(stderr_path, "wb") as se:
+                return subprocess.run(cmd, cwd=str(cwd), stdout=so, stderr=se,
+                                      timeout=timeout)
         except subprocess.TimeoutExpired:
             return "timeout"
         except Exception as e:
@@ -356,44 +362,42 @@ class CodeBuddyExecutor:
 
     def _run_codebuddy(self, prompt: str, session_id, timeout: int, cwd: Path,
                        task_dir: Path = None):
+        if task_dir is None:
+            task_dir = cwd
         proc = None
-        for attempt in (1, 2):  # 输出截断（代理链路中断）自动重试一次
+        stdout_text = ""
+        for attempt in (1, 2):  # 输出截断自动重试一次（双保险）
+            suffix = "" if attempt == 1 else f".retry{attempt}"
+            so_path = task_dir / f"stdout_raw{suffix}.json"
+            se_path = task_dir / f"stderr_raw{suffix}.txt"
             r = self._invoke_codebuddy(prompt, session_id if attempt == 1 else None,
-                                       timeout, cwd)
+                                       timeout, cwd, so_path, se_path)
             if isinstance(r, str):
                 if r == "timeout":
                     return "", None, "timeout", f"CodeBuddy 执行超时（>{timeout}s），进程已终止"
                 return "", None, "error", f"拉起 CodeBuddy 失败: {r}"
             proc = r
-            # 原始输出落盘（排障证据：解析器对不上版本格式时，可事后分析真实结构）
-            if task_dir is not None:
-                try:
-                    suffix = "" if attempt == 1 else f".retry{attempt}"
-                    (task_dir / f"stdout_raw{suffix}.json").write_text(
-                        proc.stdout or "", encoding="utf-8")
-                    (task_dir / f"stderr_raw{suffix}.txt").write_text(
-                        proc.stderr or "", encoding="utf-8")
-                except OSError as e:
-                    log.warning("原始输出落盘失败: %s", e)
-            if not _stdout_truncated(proc.stdout or ""):
+            stdout_text = so_path.read_text(encoding="utf-8", errors="replace")
+            if not _stdout_truncated(stdout_text):
                 break
-            log.warning("stdout JSON 未闭合（attempt %s，疑似代理链路中断截断），%s",
-                        attempt, "重试一次" if attempt == 1 else "两次均截断")
+            log.warning("stdout JSON 未闭合（attempt %s，bytes=%s），%s",
+                        attempt, so_path.stat().st_size,
+                        "重试一次" if attempt == 1 else "两次均截断")
         else:
             return ("", None, "error",
-                    "CodeBuddy 输出被截断（stdout JSON 未闭合，实测诱因：代理/TUN "
-                    "链路中断 API 流式响应，CLI 以 exit 0 结束）。请重发任务，或在"
-                    "该机器上让 CodeBuddy 的 API 流量绕过代理")
+                    "CodeBuddy 输出被截断（stdout JSON 未闭合）。请重发任务；若复现"
+                    "请检查该机器 codebuddy 版本（已知管道 stdout >64KB 截断问题）")
 
-        data = extract_json(proc.stdout or "")
-        output, session = parse_codebuddy_output(proc.stdout or "")
+        data = extract_json(stdout_text)
+        output, session = parse_codebuddy_output(stdout_text)
+        stderr_text = (se_path.read_text(encoding="utf-8", errors="replace")).strip()
         if data is not None and output:
             if proc.returncode != 0:
-                return (proc.stderr or output)[:OUTPUT_LIMIT], session, "error", f"exit_code={proc.returncode}"
+                return (stderr_text or output)[:OUTPUT_LIMIT], session, "error", f"exit_code={proc.returncode}"
             return output, session, "success", None
         # stdout 非 JSON：退回原始文本
-        raw = (proc.stdout or proc.stderr or "").strip()
-        if proc.stdout and proc.stdout.lstrip().startswith("[") and len(raw) > OUTPUT_LIMIT:
+        raw = (stdout_text or stderr_text).strip()
+        if stdout_text.lstrip().startswith("[") and len(raw) > OUTPUT_LIMIT:
             # 未闭合会话数组：结论在尾部（assistant/result），头部是 user 上下文噪音
             raw = "...(前略)...\n" + raw[-(OUTPUT_LIMIT - 15):]
         return raw[:OUTPUT_LIMIT], None, ("success" if proc.returncode == 0 else "error"), \
