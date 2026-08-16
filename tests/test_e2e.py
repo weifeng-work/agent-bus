@@ -92,12 +92,11 @@ def main():
                 time.sleep(0.3)
         check("独立 Broker 启动", broker_ok)
 
-        # 1. 启动服务端（指向测试 broker；隔离环境免令牌）
+        # 1. 启动服务端（指向测试 broker；面板已全匿名，无需令牌参数）
         procs.append(subprocess.Popen(
             [sys.executable, str(ROOT / "server" / "bus_server.py"),
              "--port", str(PORT), "--db", str(tmp / "bus.db"),
-             "--files-dir", str(tmp / "files"), "--broker-port", str(BPORT),
-             "--no-api-auth"],
+             "--files-dir", str(tmp / "files"), "--broker-port", str(BPORT)],
             stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
         ))
         check("服务端启动 (HTTP ready)", wait_http(f"{BASE}/api/health"))
