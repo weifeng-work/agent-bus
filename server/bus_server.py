@@ -12,17 +12,26 @@ import argparse
 import json
 import logging
 import os
+import platform as _platform
+import secrets
 import sqlite3
+import sys
 import threading
 import time
 import uuid
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import paho.mqtt.client as mqtt
 import uvicorn
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from agent_bus import provision
+from agent_bus.discovery import BeaconBroadcaster, PROTO, PROTO_VER
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("bus_server")
@@ -73,13 +82,19 @@ class Store:
                     token TEXT PRIMARY KEY, agent_id TEXT,
                     role TEXT DEFAULT 'node', created_at REAL
                 );
+                CREATE TABLE IF NOT EXISTS team_info(
+                    id INTEGER PRIMARY KEY CHECK (id=1),
+                    team_id TEXT, team_name TEXT,
+                    pass_hash TEXT, created_at REAL, updated_at REAL
+                );
                 """
             )
-            # 增量迁移：为旧库补 hostname 列（已存在则忽略）
-            try:
-                self.conn.execute("ALTER TABLE agents ADD COLUMN hostname TEXT")
-            except sqlite3.OperationalError:
-                pass
+            # 增量迁移：逐列补齐（列已存在时忽略；必须分开 try，否则前一列失败会跳过后一列）
+            for col in ("hostname", "health"):
+                try:
+                    self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
+                except sqlite3.OperationalError:
+                    pass
 
     def execute(self, sql, params=(), fetch=False):
         with _db_lock, self.conn:
@@ -91,22 +106,25 @@ class Store:
 
     def upsert_agent(self, msg: dict):
         self.execute(
-            """INSERT INTO agents(agent_id,name,capabilities,platform,executor,hostname,online,last_seen,registered_at)
-               VALUES(?,?,?,?,?,?,1,?,?)
+            """INSERT INTO agents(agent_id,name,capabilities,platform,executor,hostname,health,online,last_seen,registered_at)
+               VALUES(?,?,?,?,?,?,?,1,?,?)
                ON CONFLICT(agent_id) DO UPDATE SET
                  name=excluded.name, capabilities=excluded.capabilities,
                  platform=excluded.platform, executor=excluded.executor,
-                 hostname=excluded.hostname,
+                 hostname=excluded.hostname, health=excluded.health,
                  online=1, last_seen=excluded.last_seen""",
             (msg["agent_id"], msg.get("name", ""), json.dumps(msg.get("capabilities", [])),
              msg.get("platform", ""), msg.get("executor", ""), msg.get("hostname", ""),
+             msg.get("health", "unknown"),
              time.time(), msg.get("registered_at", time.time())),
         )
 
-    def heartbeat(self, agent_id: str):
+    def heartbeat(self, agent_id: str, health: str = None):
+        # 心跳携带 health 时同步刷新（执行器登录态变化的推送通道）
         self.execute(
-            "UPDATE agents SET online=1, last_seen=? WHERE agent_id=?",
-            (time.time(), agent_id),
+            "UPDATE agents SET online=1, last_seen=?, "
+            "health=COALESCE(NULLIF(?,''), health) WHERE agent_id=?",
+            (time.time(), health, agent_id),
         )
 
     def mark_offline(self, agent_id: str):
@@ -123,6 +141,7 @@ class Store:
                 "capabilities": json.loads(r["capabilities"] or "[]"),
                 "platform": r["platform"], "executor": r["executor"],
                 "hostname": r["hostname"] or "",
+                "health": r["health"] or "unknown",
                 "online": bool(r["online"]) and not stale,
                 "last_seen": r["last_seen"], "registered_at": r["registered_at"],
             })
@@ -198,6 +217,26 @@ class Store:
         )
         return dict(rows[0]) if rows else None
 
+    # ---- team ----
+
+    def get_team(self):
+        rows = self.execute("SELECT * FROM team_info WHERE id=1", fetch=True)
+        return dict(rows[0]) if rows else None
+
+    def init_team(self, team_id: str, team_name: str, pass_hash: str):
+        self.execute(
+            "INSERT OR REPLACE INTO team_info(id,team_id,team_name,pass_hash,created_at,updated_at)"
+            " VALUES(1,?,?,?,?,?)",
+            (team_id, team_name, pass_hash, time.time(), time.time()),
+        )
+
+    def set_passphrase(self, pass_hash: str):
+        self.execute("UPDATE team_info SET pass_hash=?, updated_at=? WHERE id=1",
+                     (pass_hash, time.time()))
+
+    def delete_agent(self, agent_id: str):
+        self.execute("DELETE FROM agents WHERE agent_id=?", (agent_id,))
+
 
 # ---------------------------------------------------------------------------
 # MQTT 桥
@@ -245,10 +284,40 @@ class MqttBridge:
             self.store.upsert_agent(data)
             log.info("注册: %s (%s)", data.get("agent_id"), data.get("name", ""))
         elif topic.startswith("bus/heartbeat/"):
-            self.store.heartbeat(data.get("agent_id", ""))
+            self.store.heartbeat(data.get("agent_id", ""), health=data.get("health"))
         elif topic.startswith("bus/offline/"):
             self.store.mark_offline(data.get("agent_id", ""))
             log.info("离线(遗嘱): %s", data.get("agent_id"))
+
+
+# ---------------------------------------------------------------------------
+# join 限速（内存态：每 IP 5 次失败锁 5 分钟——防短码爆破）
+# ---------------------------------------------------------------------------
+
+class JoinRateLimiter:
+    def __init__(self, max_fails=5, lock_seconds=300):
+        self.max_fails, self.lock_seconds = max_fails, lock_seconds
+        self._state = {}  # ip -> {"fails": int, "lock_until": float}
+        self._lock = threading.Lock()
+
+    def check(self, ip: str):
+        with self._lock:
+            st = self._state.get(ip)
+            if st and st["lock_until"] > time.time():
+                wait = int(st["lock_until"] - time.time())
+                raise HTTPException(429, f"失败次数过多，已锁定，请 {wait}s 后重试")
+
+    def fail(self, ip: str):
+        with self._lock:
+            st = self._state.setdefault(ip, {"fails": 0, "lock_until": 0})
+            st["fails"] += 1
+            if st["fails"] >= self.max_fails:
+                st["lock_until"] = time.time() + self.lock_seconds
+                st["fails"] = 0
+
+    def reset(self, ip: str):
+        with self._lock:
+            self._state.pop(ip, None)
 
 
 # ---------------------------------------------------------------------------
@@ -256,12 +325,14 @@ class MqttBridge:
 # ---------------------------------------------------------------------------
 
 def create_app(store: Store, files_dir: Path, bridge: MqttBridge,
-               auth_enabled: bool = True) -> FastAPI:
+               auth_enabled: bool = True, broker_port: int = 1883) -> FastAPI:
     app = FastAPI(title="Agent Bus Server")
     files_dir.mkdir(parents=True, exist_ok=True)
 
     from fastapi import Depends, Header
     from fastapi.security.utils import get_authorization_scheme_param
+
+    join_limiter = JoinRateLimiter()
 
     def require_token(authorization: str = Header(None), token: str = Query(None)):
         """API 令牌认证：Authorization: Bearer <token> 或 ?token=（供浏览器下载链接）。
@@ -281,10 +352,119 @@ def create_app(store: Store, files_dir: Path, bridge: MqttBridge,
             raise HTTPException(401, "invalid token")
         return ident
 
+    def require_admin(ident: dict = Depends(require_token)):
+        """管理操作（口令管理/节点移除）：仅 admin/bridge 角色（role 分离，审核 E.1）。"""
+        if auth_enabled and ident.get("role") not in ("admin", "bridge"):
+            raise HTTPException(403, "admin role required")
+        return ident
+
     @app.get("/api/health")
     def health():
         # 开放端点（发现/连通性探测用），不泄露任何业务信息
         return {"ok": True}
+
+    # ---- 队伍：首次向导 + 加入（唯一的匿名业务端点） ----
+
+    class SetupBody(BaseModel):
+        team_name: str
+        passphrase: str
+
+    class JoinBody(BaseModel):
+        passphrase: str
+        agent_id: str = ""
+        device_name: str = ""
+        platform: str = ""
+
+    @app.get("/api/team/status")
+    def team_status():
+        """匿名：面板据此决定显示首次向导还是登录。不泄露口令相关信息。"""
+        t = store.get_team()
+        return {"initialized": bool(t), "team_name": t["team_name"] if t else ""}
+
+    @app.post("/api/team/setup")
+    def team_setup(body: SetupBody):
+        """匿名但仅可用一次：队伍未初始化时允许设定队名+口令（首启向导）。
+        已初始化后永久 403——重置口令需 admin 登录面板操作。"""
+        if store.get_team():
+            raise HTTPException(403, "team already initialized")
+        team_name = body.team_name.strip()
+        if not (1 <= len(team_name) <= 32):
+            raise HTTPException(400, "队伍名称长度需 1-32")
+        if not (4 <= len(body.passphrase) <= 64):
+            raise HTTPException(400, "口令长度需 4-64")
+        store.init_team(uuid.uuid4().hex[:12], team_name,
+                        provision.hash_passphrase(body.passphrase))
+        log.info("队伍已初始化: %s", team_name)
+        return {"ok": True, "team_name": team_name}
+
+    @app.post("/api/join")
+    def join(body: JoinBody, request: Request):
+        """子设备加入队伍：核对口令 → 自动发凭据（MQTT 用户 + role=node HTTP 令牌）。
+
+        安全：匿名端点仅此一个；口令错误计入 IP 限速（5 次锁 5 分钟）；
+        重置节点先撤销旧令牌（provision 幽灵令牌修复）。
+        """
+        team = store.get_team()
+        if not team:
+            raise HTTPException(403, "team not initialized")
+        ip = request.client.host if request.client else "?"
+        join_limiter.check(ip)
+        if not provision.verify_passphrase(body.passphrase, team["pass_hash"]):
+            join_limiter.fail(ip)
+            raise HTTPException(401, "口令错误")
+        join_limiter.reset(ip)
+
+        agent_id = (body.agent_id or "").strip() or f"node-{uuid.uuid4().hex[:6]}"
+        if not provision.valid_agent_id(agent_id):
+            raise HTTPException(400, "agent_id 非法（限 [A-Za-z0-9_-]，1-64 位）")
+        try:
+            creds = provision.CredStore(db_path=store.db_path).provision(agent_id, role="node")
+        except (RuntimeError, FileNotFoundError, ValueError) as e:
+            raise HTTPException(500, f"凭据开通失败: {e}")
+
+        restarted, restart_msg = provision.restart_user_broker()
+        if not restarted:
+            log.warning("join: %s", restart_msg)
+        log.info("节点加入: %s (%s) from %s", agent_id, body.device_name, ip)
+        return {
+            "ok": True, "team_name": team["team_name"], "team_id": team["team_id"],
+            "agent_id": agent_id,
+            "mqtt_user": creds["mqtt_user"], "mqtt_pass": creds["mqtt_pass"],
+            "http_token": creds["http_token"],
+            "broker_host": provision.get_local_ip(), "broker_port": broker_port,
+            "broker_restarted": restarted, "broker_message": restart_msg,
+        }
+
+    # ---- 管理（admin/bridge 角色） ----
+
+    class PassphraseBody(BaseModel):
+        passphrase: str = ""   # 留空自动生成 6 位数字短码
+
+    @app.post("/api/admin/passphrase")
+    def regenerate_passphrase(body: PassphraseBody, ident: dict = Depends(require_admin)):
+        new_pass = body.passphrase.strip() or f"{secrets.randbelow(1000000):06d}"
+        if not (4 <= len(new_pass) <= 64):
+            raise HTTPException(400, "口令长度需 4-64")
+        store.set_passphrase(provision.hash_passphrase(new_pass))
+        log.info("加入口令已重新生成（不影响在册设备）by %s", ident.get("agent_id"))
+        return {"ok": True, "passphrase": new_pass}
+
+    @app.delete("/api/admin/nodes/{agent_id}")
+    def remove_node(agent_id: str, ident: dict = Depends(require_admin)):
+        """移除节点：吊销 HTTP 令牌 + 删 MQTT 用户 + 从名单摘除。passwd 需重启生效。"""
+        if agent_id == provision.BRIDGE_USER:
+            raise HTTPException(400, "不能移除桥接账号")
+        cs = provision.CredStore(db_path=store.db_path)
+        cs.revoke_tokens(agent_id)
+        try:
+            provision.remove_mqtt_user(provision.auth_dir() / "passwd", agent_id)
+        except (RuntimeError, FileNotFoundError) as e:
+            log.warning("移除 MQTT 用户失败（继续摘除名单）: %s", e)
+        store.delete_agent(agent_id)
+        restarted, restart_msg = provision.restart_user_broker()
+        log.info("节点已移除: %s by %s（%s）", agent_id, ident.get("agent_id"), restart_msg)
+        return {"ok": True, "agent_id": agent_id, "broker_restarted": restarted,
+                "broker_message": restart_msg}
 
     @app.get("/api/agents")
     def agents(ident: dict = Depends(require_token)):
@@ -361,7 +541,20 @@ def main():
     bridge = MqttBridge(store, args.broker_host, args.broker_port,
                         username=args.mqtt_user, password=args.mqtt_pass)
     bridge.start()
-    app = create_app(store, Path(args.files_dir), bridge, auth_enabled=not args.no_api_auth)
+    app = create_app(store, Path(args.files_dir), bridge,
+                     auth_enabled=not args.no_api_auth, broker_port=args.broker_port)
+
+    # 队伍发现广播：未初始化时 get_beacon 返回 None，不广播
+    def _beacon():
+        t = store.get_team()
+        if not t:
+            return None
+        return {"proto": PROTO, "ver": PROTO_VER, "team_id": t["team_id"],
+                "team_name": t["team_name"], "host_name": _platform.node(),
+                "ips": provision.get_local_ips(),  # 多网卡/代理 TUN 场景全量自报
+                "mqtt_port": args.broker_port, "http_port": args.port}
+
+    BeaconBroadcaster(_beacon).start()
     log.info("Agent Bus Server 启动: http://%s:%d (面板在 /)", args.host, args.port)
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 

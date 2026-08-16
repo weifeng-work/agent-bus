@@ -63,6 +63,9 @@
   .exp-btn { color: var(--brand); cursor: pointer; font-size: 12px; border: none;
              background: none; padding: 0; margin-left: 10px; white-space: nowrap; }
   .exp-btn:hover { text-decoration: underline; }
+  .chip .rm { color: #c53030; cursor: pointer; font-weight: 700; font-size: 13px;
+              margin-left: 2px; opacity: .55; }
+  .chip .rm:hover { opacity: 1; }
 </style>
 </head>
 <body>
@@ -75,12 +78,35 @@
     <button onclick="saveToken()" style="margin-top:12px;width:100%;padding:10px;background:#238636;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;">进入面板</button>
   </div>
 </div>
+<div id="wizard" style="display:none;position:fixed;inset:0;background:rgba(13,17,23,.95);z-index:100;align-items:center;justify-content:center;">
+  <div style="max-width:440px;padding:32px;background:#161b22;border:1px solid #30363d;border-radius:12px;">
+    <div style="font-size:19px;font-weight:600;color:#e6edf3;margin-bottom:6px;">创建你的队伍</div>
+    <div style="font-size:12px;color:#8b949e;margin-bottom:18px;">首次运行。设定队伍名称与加入口令——局域网内其他设备凭口令加入本队伍。</div>
+    <input id="wizTeamName" placeholder="队伍名称（如：Alpha 小队）"
+           style="width:100%;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#e6edf3;box-sizing:border-box;margin-bottom:10px;">
+    <input id="wizPass" type="password" placeholder="加入口令（4-64 位，子设备加入时输入）"
+           style="width:100%;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#e6edf3;box-sizing:border-box;">
+    <div id="wizErr" style="color:#f85149;font-size:12px;margin-top:8px;min-height:16px;"></div>
+    <button onclick="doSetup()" style="margin-top:10px;width:100%;padding:10px;background:#238636;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;">创建队伍并开始广播</button>
+  </div>
+</div>
+<div id="passModal" style="display:none;position:fixed;inset:0;background:rgba(13,17,23,.9);z-index:101;align-items:center;justify-content:center;">
+  <div style="max-width:420px;padding:28px;background:#161b22;border:1px solid #30363d;border-radius:12px;text-align:center;">
+    <div style="font-size:15px;font-weight:600;color:#e6edf3;margin-bottom:6px;">新的加入口令</div>
+    <div style="font-size:12px;color:#8b949e;margin-bottom:14px;">仅在册设备不受影响。告知要加入的新设备：</div>
+    <div id="passValue" style="font-size:30px;font-weight:700;color:#58a6ff;letter-spacing:6px;font-family:monospace;margin-bottom:16px;"></div>
+    <button onclick="document.getElementById('passModal').style.display='none'" style="padding:8px 22px;background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:8px;cursor:pointer;">我记下了</button>
+  </div>
+</div>
 <header>
   <div class="dot" id="conn"></div>
   <h1>Agent Bus 控制面板</h1>
+  <span id="teamBadge" style="display:none;font-size:12px;padding:2px 10px;border-radius:999px;background:#eef0ff;color:var(--brand);font-weight:600;"></span>
+  <button id="passBtn" onclick="regenPass()" style="display:none;margin-left:8px;font-size:12px;padding:3px 12px;border-radius:999px;border:1px solid var(--border);background:var(--card);cursor:pointer;color:var(--muted);">重新生成口令</button>
   <span id="status">连接中…</span>
 </header>
 <main>
+  <div id="auth-banner" style="display:none"></div>
   <h2>已注册智能体</h2>
   <div id="agents"></div>
 
@@ -241,8 +267,57 @@ function agentChip(a) {
   return `<span class="chip ${a.online ? "" : "offline"}"
     title="${esc(a.agent_id)} · ${esc(exe)}${a.online ? "" : " · 离线"}">
     <span class="dot ${a.online ? "" : "off"}"></span>${esc(a.name)}${tag}
-    <span class="exe">${esc(exeShort)}</span></span>`;
+    <span class="exe">${esc(exeShort)}</span>
+    <span class="rm" data-rm="${esc(a.agent_id)}" title="移除节点（吊销凭据）">×</span></span>`;
 }
+
+// 移除节点（事件委托）
+document.getElementById("agents").addEventListener("click", e => {
+  const rm = e.target.closest(".rm");
+  if (!rm) return;
+  const id = rm.dataset.rm;
+  if (!confirm(`移除节点 ${id}？将吊销其 MQTT 密码与 HTTP 令牌。`)) return;
+  busFetch("/api/admin/nodes/" + encodeURIComponent(id), { method: "DELETE" })
+    .then(async r => {
+      if (r.status === 403) { alert("需要管理员令牌（当前令牌 role=node）"); return; }
+      if (!r.ok) { alert("移除失败: " + (await r.text())); return; }
+      const j = await r.json();
+      if (!j.broker_restarted) alert("已移除。注意: " + j.broker_message);
+      load();
+    });
+});
+
+// 重新生成加入口令（仅 admin/bridge 角色）
+function regenPass() {
+  busFetch("/api/admin/passphrase", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+    .then(async r => {
+      if (r.status === 403) { alert("需要管理员令牌（当前令牌 role=node）"); return; }
+      if (!r.ok) { alert("失败: " + (await r.text())); return; }
+      const j = await r.json();
+      document.getElementById("passValue").textContent = j.passphrase;
+      document.getElementById("passModal").style.display = "flex";
+    });
+}
+
+// 首次向导
+async function doSetup() {
+  const name = document.getElementById("wizTeamName").value.trim();
+  const pass = document.getElementById("wizPass").value;
+  const err = document.getElementById("wizErr");
+  err.textContent = "";
+  try {
+    const r = await fetch("/api/team/setup", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ team_name: name, passphrase: pass }),
+    });
+    if (!r.ok) { err.textContent = (await r.json()).detail || "创建失败"; return; }
+    document.getElementById("wizard").style.display = "none";
+    teamNameCache = name;
+    bootAfterWizard();
+  } catch (e) { err.textContent = "网络错误"; }
+}
+
+let teamNameCache = "";
 
 function renderAgents(agents) {
   // 按 hostname 分组（空则归 "_unknown"），组内 chip 横向流式排布
@@ -299,6 +374,14 @@ async function load() {
     document.getElementById("status").textContent =
       `${agents.filter(a => a.online).length}/${agents.length} 在线 · ${msgs.length} 条消息 · ${files.length} 个文件`;
 
+    // 队伍徽标 + 口令管理（登录成功后展示）
+    const badge = document.getElementById("teamBadge");
+    if (teamNameCache) {
+      badge.textContent = "队伍 · " + teamNameCache;
+      badge.style.display = "inline-block";
+      document.getElementById("passBtn").style.display = "inline-block";
+    }
+
     renderAgents(agents);
 
     renderMessages(msgs);
@@ -317,8 +400,27 @@ async function load() {
     }
   }
 }
-load();
-setInterval(load, 3000);
+
+// 启动：先查队伍状态——未初始化显示首次向导，已初始化走正常加载（未登录则弹登录）
+async function boot() {
+  try {
+    const r = await fetch("/api/team/status");
+    const t = await r.json();
+    if (!t.initialized) {
+      document.getElementById("wizard").style.display = "flex";
+      document.getElementById("status").textContent = "首次运行：创建队伍";
+      return;
+    }
+    teamNameCache = t.team_name;
+  } catch (e) { /* 状态查询失败则继续走正常加载（兼容旧版服务端） */ }
+  bootAfterWizard();
+}
+
+function bootAfterWizard() {
+  load();
+  if (!window._timer) window._timer = setInterval(load, 3000);
+}
+boot();
 </script>
 </body>
 </html>
