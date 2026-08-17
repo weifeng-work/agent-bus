@@ -1,4 +1,4 @@
-# agent-bus Windows 节点一键安装（WorkBuddy 桌面端执行器）
+﻿# agent-bus Windows 节点一键安装（WorkBuddy 桌面端执行器）
 #
 # 在目标 Windows 机上以【普通权限】PowerShell 运行（零参数，全部自动探测）:
 #   irm https://raw.githubusercontent.com/weifeng-work/agent-bus/main/scripts/install_windows.ps1 | iex
@@ -10,7 +10,7 @@
 #   1. 检测/安装 Python（winget）
 #   2. 下载项目 zip 解压到 C:\agent-bus（无需 git）
 #   3. pip 安装 paho-mqtt pywinauto
-#   4. 生成 start_executor.bat（最小化窗口 + 日志到 %LOCALAPPDATA%\agent-bus-executor.log）
+#   4. 生成 start_executor.bat（pythonw 无窗口 + 日志到 %LOCALAPPDATA%\agent-bus-executor.log）
 #   5. 注册"登录时自启"计划任务并立即启动
 #   出站连接 MQTT(1883)，不开任何入站端口、无需防火墙配置。
 param(
@@ -73,19 +73,39 @@ Write-Host "  [3/5] 安装 Python 依赖 (paho-mqtt pywinauto)..."
 if ($LASTEXITCODE -ne 0) { throw "pip 安装失败，检查网络后重跑" }
 Write-Host "  [3/5] 依赖就绪"
 
-# ---------- 4. 启动器 ----------
+# ---------- 4. 启动器（pythonw 无窗口） ----------
 Write-Host "  [4/5] 生成启动器..."
+# 解析 pythonw（无控制台，避免受控机弹黑窗）
+$pyw = (Get-Command pythonw -ErrorAction SilentlyContinue).Source
+if (-not $pyw) {
+    $pw = Get-Command pyw -ErrorAction SilentlyContinue
+    if ($pw) { $pyw = "pyw" } else { $pyw = "pythonw" }
+}
+$exeArgs = @(
+    "executor\workbuddy_executor.py",
+    "--agent-id", $AgentId,
+    "--name", $Name,
+    "--broker-host", $BrokerHost,
+    "--broker-port", $BrokerPort,
+    "--workdir", "$InstallDir\data\executor_work"
+)
+# 仅手动双击用；已改用 pythonw，不弹黑窗
 $bat = @"
 @echo off
 cd /d $InstallDir
-start "" /min cmd /c "$py executor\workbuddy_executor.py --agent-id $AgentId --name `"$Name`" --broker-host $BrokerHost --broker-port $BrokerPort --workdir `"$InstallDir\data\executor_work`" > `"$LogFile`" 2>&1"
+start "" pythonw.exe executor\workbuddy_executor.py --agent-id $AgentId --name `"$Name`" --broker-host $BrokerHost --broker-port $BrokerPort --workdir `"$InstallDir\data\executor_work`" > "$LogFile" 2>&1
 "@
 Set-Content -Path "$InstallDir\start_executor.bat" -Value $bat -Encoding ASCII
 
-# ---------- 5. 计划任务（登录自启，用户会话内——UIA 必需） ----------
+# ---------- 5. 计划任务（登录自启，Hidden，无黑窗） ----------
+# PowerShell 原生 Register-ScheduledTask：不受 schtasks /tr 261 字符上限限制，且 Settings.Hidden
 Write-Host "  [5/5] 注册计划任务..."
-schtasks /create /tn "AgentBusWorkBuddy" /tr "`"$InstallDir\start_executor.bat`"" /sc onlogon /f | Out-Null
-Start-Process "$InstallDir\start_executor.bat"
+$exeArgsStr = ($exeArgs | ForEach-Object { if ($_ -match '\s') { "`"$_`"" } else { $_ } }) -join " "
+$act = New-ScheduledTaskAction -Execute $pyw -Argument $exeArgsStr -WorkingDirectory $InstallDir
+$trig = New-ScheduledTaskTrigger -AtLogOn
+$set = New-ScheduledTaskSettingsSet -Hidden -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 0)
+Register-ScheduledTask -TaskName "AgentBusWorkBuddy" -Action $act -Trigger $trig -Settings $set -Force | Out-Null
+Start-Process -FilePath $pyw -ArgumentList $exeArgs -WindowStyle Hidden -WorkingDirectory $InstallDir
 Start-Sleep 5
 Write-Host ""
 Write-Host "== 安装完成 ==" -ForegroundColor Green
