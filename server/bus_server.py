@@ -454,6 +454,15 @@ def create_app(store: Store, files_dir: Path, bridge: MqttBridge,
         log.info("控制配对已全部重置")
         return {"ok": True}
 
+    @app.get("/api/control/pairs")
+    def control_pairs(request: Request):
+        """已配对节点列表（仅本机，面板安全设置用）。"""
+        local_only(request)
+        rows = store.execute(
+            "SELECT agent_id, paired_at FROM control_pairs ORDER BY paired_at",
+            fetch=True)
+        return [dict(r) for r in rows]
+
     @app.get("/api/agents")
     def agents(ident: dict = Depends(require_token)):
         return store.list_agents()

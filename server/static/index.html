@@ -103,6 +103,25 @@
       <th style="width:150px">时间</th><th style="width:110px">ID</th></tr></thead>
     <tbody id="files"></tbody>
   </table>
+
+  <h2>安全设置（控制面配对）<span id="secHint" style="font-size:11px;color:var(--muted);font-weight:400;">仅主机本机可操作</span></h2>
+  <div style="display:flex;flex-wrap:wrap;gap:16px;margin-bottom:8px;">
+    <div style="flex:1;min-width:280px;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px;">
+      <div style="font-weight:600;margin-bottom:6px;">一次性安装码</div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:10px;">受控机安装时输入（setup_worker 的 <code>-PairCode</code>）。8 位、15 分钟有效、一次性；码不落网，两端各自本地派生密钥。</div>
+      <button onclick="genCode()" style="padding:6px 14px;background:var(--brand);color:#fff;border:none;border-radius:8px;cursor:pointer;">生成安装码</button>
+      <div id="codeBox" style="display:none;margin-top:10px;font-family:'SF Mono',Consolas,monospace;font-size:16px;background:#eef0f7;border:1px solid var(--border);border-radius:8px;padding:10px 12px;">
+        <b id="codeText"></b> <span id="codeExp" style="font-size:12px;color:var(--muted);"></span>
+        <button onclick="copyCode()" style="margin-left:8px;padding:4px 10px;border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:12px;">复制</button>
+      </div>
+      <div id="codeErr" style="color:#c53030;font-size:12px;margin-top:8px;min-height:14px;"></div>
+    </div>
+    <div style="flex:1;min-width:280px;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px;">
+      <div style="font-weight:600;margin-bottom:6px;">已配对节点</div>
+      <div id="pairsList" style="font-size:12px;min-height:40px;color:var(--muted);"></div>
+      <button onclick="resetPairs()" style="margin-top:10px;padding:6px 14px;background:#c53030;color:#fff;border:none;border-radius:8px;cursor:pointer;">重置全部配对</button>
+    </div>
+  </div>
 </main>
 <script>
 const fmt = ts => new Date(ts * 1000).toLocaleString("zh-CN", { hour12: false });
@@ -319,6 +338,54 @@ function busFetch(url, opts) {
   return fetch(url, opts);
 }
 
+// ---- 安全设置：控制面配对（一次性安装码 / 已配对节点 / 重置） ----
+let lastCode = "";
+
+async function genCode() {
+  const err = document.getElementById("codeErr");
+  err.textContent = "";
+  try {
+    const r = await fetch("/api/control/codes", { method: "POST" });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      err.textContent = d.detail || "生成失败（仅主机本机可操作）";
+      return;
+    }
+    const j = await r.json();
+    lastCode = j.code;
+    document.getElementById("codeText").textContent = j.code;
+    document.getElementById("codeExp").textContent = "· 有效期至 " + fmt(j.expires_at) + "（一次性）";
+    document.getElementById("codeBox").style.display = "block";
+  } catch (e) { err.textContent = "网络错误"; }
+}
+
+function copyCode() {
+  if (!lastCode) return;
+  if (navigator.clipboard) navigator.clipboard.writeText(lastCode)
+    .then(() => alert("已复制: " + lastCode)).catch(() => {});
+  else alert("安装码: " + lastCode);
+}
+
+async function loadPairs() {
+  const el = document.getElementById("pairsList");
+  try {
+    const r = await fetch("/api/control/pairs");
+    if (!r.ok) { el.innerHTML = "仅主机本机可查看"; return; }
+    const rows = await r.json();
+    el.innerHTML = rows.length
+      ? rows.map(p => `<div style="margin:2px 0;">${esc(p.agent_id)} <span style="color:var(--muted)">· ${fmt(p.paired_at)}</span></div>`).join("")
+      : "暂无配对节点";
+  } catch (e) { el.innerHTML = "不可用"; }
+}
+
+function resetPairs() {
+  if (!confirm("重置全部配对？所有受控机的 shell 控制将立即失效，需重新生成安装码配对。")) return;
+  fetch("/api/control/reset", { method: "POST" })
+    .then(r => r.json())
+    .then(j => { alert(j.ok ? "已重置全部配对" : "重置失败"); loadPairs(); })
+    .catch(() => alert("网络错误"));
+}
+
 async function load() {
   try {
     const [agents, msgs, files] = await Promise.all([
@@ -346,6 +413,8 @@ async function load() {
       <tr><td><a href="${esc(f.url)}" target="_blank">${esc(f.name)}</a></td><td class="muted">${(f.size / 1024).toFixed(1)} KB</td>
       <td>${esc(f.uploaded_by || "-")}</td><td class="muted">${fmt(f.ts)}</td>
       <td class="muted">${esc(f.file_id)}</td></tr>`).join("") || '<tr><td colspan="5" class="muted">暂无文件</td></tr>';
+
+    loadPairs();  // 安全设置：已配对节点（3 秒轮询随 load 刷新）
   } catch (e) {
     document.getElementById("conn").classList.add("off");
     document.getElementById("status").textContent = "服务不可达";
