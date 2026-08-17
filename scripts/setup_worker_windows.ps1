@@ -102,8 +102,8 @@ try {
 }
 Write-Host "  [4/5] 已加入队伍"
 
-# ---------- 5. 启动执行器 ----------
-Write-Host "  [5/5] 生成并启动执行器（$Executor）..."
+# ---------- 5. 安装通信节点（托盘壳，三层自愈） ----------
+Write-Host "  [5/5] 安装通信节点（托盘壳，三层自愈）..."
 # 从加入写出的设备身份读取 agent_id（host-xxxx），保证稳定
 $devJson = "$env:USERPROFILE\.config\agent-bus\device.json"
 $agentId = ""
@@ -113,20 +113,15 @@ if (Test-Path $devJson) {
 if (-not $agentId) { $agentId = $Executor + "_" + ($env:COMPUTERNAME.ToLower() -replace '[^a-z0-9]', '') }
 if (-not $Name)    { $Name = ($Executor.Substring(0,1).ToUpper() + $Executor.Substring(1)) + "@$env:COMPUTERNAME" }
 
-$bat = @"
-@echo off
-cd /d $InstallDir
-start "" /min cmd /c "$py executor\${Executor}_executor.py --agent-id $agentId --name `"$Name`" > `"$LogFile`" 2>&1"
-"@
-Set-Content -Path "$InstallDir\start_executor.bat" -Value $bat -Encoding ASCII
-schtasks /create /tn "AgentBus$Executor" /tr "`"$InstallDir\start_executor.bat`"" /sc onlogon /f | Out-Null
-Start-Process "$InstallDir\start_executor.bat"
+# 委托 setup_tray.ps1：生成 start_tray.bat + 注册计划任务（onlogon + 分钟 watchdog）+ 启动
+& "$InstallDir\scripts\setup_tray.ps1" -InstallDir $InstallDir -Executor $Executor `
+    -AgentId $agentId -Name $Name
+if ($LASTEXITCODE -ne 0) { throw "通信节点安装失败（exit=$LASTEXITCODE）" }
 Start-Sleep 5
 
 Write-Host ""
 Write-Host "== 加入完成 ==" -ForegroundColor Green
 Write-Host "  agent_id : $agentId"
-Write-Host "  执行器   : $Executor（已注册登录自启任务 AgentBus$Executor）"
+Write-Host "  通信节点 : 托盘壳已启动（执行器由节点监督，崩溃秒级拉起；OS 分钟级兜底）"
 Write-Host "  在线验证 : 打开主机面板（http://<主机IP>:8000/）应看到 [$agentId] 在线"
 Write-Host "  日志     : $LogFile"
-Write-Host "  加入配置 : $env:USERPROFILE\.config\agent-bus\"

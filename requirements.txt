@@ -5,3 +5,6 @@ python-multipart>=0.0.9
 requests>=2.31
 mcp>=1.0
 pyte>=0.8.2
+# 通信节点托盘 UI（仅 GUI 模式需要；--headless 免装）
+pystray>=0.19
+pillow>=10.0

@@ -1,6 +1,17 @@
-"""AgentBus 客户端：MQTT 收发 + 注册/心跳/遗嘱 + 同步等待结果。"""
+"""AgentBus 客户端：MQTT 收发 + 注册/心跳/遗嘱 + 同步等待结果。
+
+状态文件上报（供托盘壳/通信节点判定真实 bus 状态，v0.4）:
+  通过 status_file 参数或环境变量 BUS_STATUS_FILE 指定路径；
+  在真实 MQTT 事件写入 {"status","agent_id","health","ts"}:
+    connected    连接成功
+    reconnecting 连接断开（on_disconnect）
+    stopped      主动断开（disconnect()）
+  心跳循环每 30s 刷新 ts（新鲜度信号）。
+  执行器零改动：通信节点拉起子进程时设置 BUS_STATUS_FILE 即可。
+"""
 import json
 import logging
+import os
 import platform as _platform
 import queue
 import threading
@@ -31,13 +42,15 @@ class AgentBus:
     """
 
     def __init__(self, agent_id: str, name: str = "", capabilities=None,
-                 executor: str = "", config: BusConfig = None):
+                 executor: str = "", config: BusConfig = None,
+                 status_file: str = ""):
         self.agent_id = agent_id
         self.name = name or agent_id
         self.capabilities = capabilities or []
         self.executor = executor
         self.health = "unknown"    # ok | auth_required | unknown（CLI 登录态）
         self.cfg = config or BusConfig.load()
+        self.status_file = status_file or os.environ.get("BUS_STATUS_FILE", "")
         self.on_message = None          # 可选回调: fn(msg_dict)
         self._inbox: "queue.Queue[dict]" = queue.Queue()
         self._pending: dict = {}        # correlation_id -> {"event", "result"}
@@ -50,6 +63,7 @@ class AgentBus:
         if self.cfg.mqtt_user:
             self._client.username_pw_set(self.cfg.mqtt_user, self.cfg.mqtt_pass)
         self._client.on_connect = self._on_connect
+        self._client.on_disconnect = self._on_disconnect
         self._client.on_message = self._on_message
         self._connected = threading.Event()
         # 遗嘱：异常掉线时由 Broker 代发，服务端标记离线
@@ -58,6 +72,25 @@ class AgentBus:
             json.dumps({"type": "offline", "agent_id": self.agent_id, "ts": time.time()}),
             qos=1,
         )
+
+    # ---------- 状态文件上报（托盘壳/通信节点读） ----------
+
+    def _write_status(self, status: str):
+        """写真实 bus 状态到状态文件；失败静默（不影响主流程）。"""
+        if not self.status_file:
+            return
+        try:
+            payload = {
+                "status": status,
+                "agent_id": self.agent_id,
+                "health": self.health,
+                "ts": time.time(),
+            }
+            path = self.status_file
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False))
+        except Exception:
+            log.debug("状态文件写入失败: %s", self.status_file)
 
     # ---------- 连接管理 ----------
 
@@ -75,6 +108,7 @@ class AgentBus:
         return self
 
     def disconnect(self):
+        self._write_status("stopped")
         try:
             self._client.disconnect()
             self._client.loop_stop()
@@ -85,9 +119,15 @@ class AgentBus:
         if reason_code == 0:
             client.subscribe(inbox_topic(self.agent_id), qos=1)
             self._connected.set()
+            self._write_status("connected")
             log.info("[%s] 已连接总线, 订阅 %s", self.agent_id, inbox_topic(self.agent_id))
         else:
             log.error("[%s] 连接失败: %s", self.agent_id, reason_code)
+
+    def _on_disconnect(self, client, userdata, disconnect_flags, reason_code,
+                       properties=None):
+        self._write_status("reconnecting")
+        log.warning("[%s] 连接断开 reason=%s，重连中", self.agent_id, reason_code)
 
     def _on_message(self, client, userdata, msg):
         try:
@@ -120,6 +160,7 @@ class AgentBus:
         while True:
             self._client.publish(topic, json.dumps(
                 {"agent_id": self.agent_id, "ts": time.time(), "health": self.health}), qos=1)
+            self._write_status("connected")  # 刷新状态文件 ts（新鲜度信号）
             time.sleep(HEARTBEAT_INTERVAL)
 
     # ---------- 注册 ----------
