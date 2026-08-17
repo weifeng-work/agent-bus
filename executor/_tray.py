@@ -52,6 +52,12 @@ class TrayGui:
                 "受控开关（关闭=紧急停止）", self._toggle_controlled,
                 checked=lambda item: n.controlled),
             pystray.MenuItem(
+                "输入配对码（控制面）", self._pair_dialog,
+                enabled=lambda item: not n.control_key_b64),
+            pystray.MenuItem(
+                "已配对 ✓", None, enabled=False,
+                visible=lambda item: bool(n.control_key_b64)),
+            pystray.MenuItem(
                 "shell 受控能力（开启后免二次确认）", self._toggle_shell_control,
                 checked=lambda item: n.shell_control),
             pystray.Menu.SEPARATOR,
@@ -62,6 +68,32 @@ class TrayGui:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("退出（watchdog ≤1min 拉回）", self._quit),
         )
+
+    def _pair_dialog(self, icon, item):
+        """人工输入配对密码（tkinter 弹窗，独立线程避免阻塞托盘）。"""
+        import threading
+        threading.Thread(target=self._pair_input_thread, daemon=True).start()
+
+    def _pair_input_thread(self):
+        import tkinter as tk
+        from tkinter import simpledialog
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            pw = simpledialog.askstring(
+                "Agent Bus 配对", "输入主控告知的配对密码（一次性，配对成功后作废）：",
+                show="*", parent=root)
+            root.destroy()
+        except Exception as e:
+            self.node.log.error("配对对话框异常: %s", e)
+            self.node.notify("配对失败", f"无法弹出输入框: {e}")
+            return
+        if not pw:
+            return
+        ok, msg = self.node.pair_with_password(pw)
+        self.node.log.info("人工配对结果: %s", msg)
+        self.node.notify("配对结果", msg)
+        self.update_menu()
 
     def _toggle_controlled(self, icon, item):
         self.node.set_controlled(not self.node.controlled)

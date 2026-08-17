@@ -64,28 +64,24 @@ curl -fsSL https://raw.githubusercontent.com/weifeng-work/agent-bus/main/scripts
 
 ## 二、子设备给智能体一句提示词安装（受控节点 = 通信节点 + 执行器）
 
-**第 0 步（主控机，一次性）**：生成控制面配对码（15 分钟有效、一次性）：
+**第 0 步（主控机，人工）**：设定控制面配对密码——打开面板 → 安全设置 → 输入一个人工决定的**配对密码**（可含大小写/数字/符号，1-64 位）→ 设定。密码 15 分钟有效、一次性、不落网；把密码告诉受控机的人（或写进提示词）。
 
-```bash
-curl -X POST http://127.0.0.1:8000/api/control/codes   # 在主机本机执行
-# 返回 {"ok":true,"code":"SK2ZEC5M",...} —— 记下 code，15 分钟内用
-```
-
-在目标 Windows 电脑上，对着那台电脑的智能体说（示例，`<配对码>` 换成上一步的 code）：
+在目标 Windows 电脑上，对着那台电脑的智能体说（示例，`<密码>` 换成上一步人工决定的密码；也可不给密码，装完后由人在受控机托盘菜单输入）：
 
 > “用 https://github.com/weifeng-work/agent-bus 把 agent-bus 作为受控节点装到我这台 Windows。
-> 先安装/确认 Python 3.10+（没有则用 winget 装 Python.Python.3.12），然后：
-> `irm https://raw.githubusercontent.com/weifeng-work/agent-bus/main/scripts/setup_worker_windows.ps1 -o C:\setup_worker.ps1`
-> 再运行 `powershell -ExecutionPolicy Bypass -File C:\setup_worker.ps1 -PairCode <配对码> -EnableShellControl`。
-> 装完后任务栏会出现 Agent Bus 托盘图标（绿色=已连接），告诉我分配到的 agent_id。”
+> 项目 README 里有完整安装说明：需要 Python 3.10+（没有就用 winget 装 Python.Python.3.12），运行 scripts/setup_worker_windows.ps1（会自动装依赖、入队、安装通信节点托盘并启动执行器）。
+> 配对密码是 `<密码>`，请用它完成控制面配对（脚本参数 -PairCode 或 comm_node --pair-code 均可）。
+> 装完任务栏会出现 Agent Bus 托盘图标（绿色=已连接），告诉我分配到的 agent_id。”
 
-智能体就会自动执行 [scripts/setup_worker_windows.ps1](scripts/setup_worker_windows.ps1)：装 Python → 下载项目 → 装依赖 → 发现主机 → 入队 → 安装通信节点（托盘壳）→ 配对 → 启动执行器 → 上线。
+智能体读 README 后会自动执行：装 Python → 下载项目 → 装依赖 → 发现主机 → 入队 → 安装通信节点（托盘壳）→ 配对 → 启动执行器 → 上线。
 
-如果你想手动在别的 Windows 机器操作：
+> 即使提示词没有配对密码、或密码已过期/无效，智能体也会完成**其他一切安装工作**，节点照常上线；配对可以延后——受控机人工在托盘菜单「输入配对码」弹窗输入密码即可激活控制面。
+
+手动/非交互安装：
 
 ```powershell
 irm https://raw.githubusercontent.com/weifeng-work/agent-bus/main/scripts/setup_worker_windows.ps1 -o C:\setup_worker.ps1
-powershell -ExecutionPolicy Bypass -File C:\setup_worker.ps1 -PairCode SK2ZEC5M -EnableShellControl
+powershell -ExecutionPolicy Bypass -File C:\setup_worker.ps1 -PairCode '人工密码' -EnableShellControl
 ```
 
 | 参数 | 说明 |
@@ -93,7 +89,7 @@ powershell -ExecutionPolicy Bypass -File C:\setup_worker.ps1 -PairCode SK2ZEC5M 
 | `-Host` | 主机 IP（省略则 UDP 扫描自动发现） |
 | `-Executor` | 启动哪个执行器：`codebuddy` / `opencode` / `workbuddy`（默认 codebuddy） |
 | `-Name` | 设备显示名（默认 `执行器@主机名`） |
-| `-PairCode` | 控制面配对码（主控机 `curl /api/control/codes` 生成；省略则 shell 控制不可用） |
+| `-PairCode` | 配对密码（主控人工设定后告知；省略则装完由托盘菜单补配对） |
 | `-EnableShellControl` | 安装即开启 shell 受控能力（默认关；开启后免二次确认，状态托盘常驻可见） |
 
 脚本依次完成：下载项目（默认 `C:\agent-bus`，普通权限不可写时**自动改用 `%LOCALAPPDATA%\agent-bus`**）→ `pip install` 依赖 → `scripts/join_team.py` 入队 → 安装通信节点（`scripts/setup_tray.ps1`：生成 start_tray.bat + 注册 `AgentBusShell` 登录自启 + `AgentBusShellWatchdog` 分钟兜底）→ 启动托盘壳 → 监督拉起执行器。
@@ -162,7 +158,7 @@ python executor/comm_node.py --role hub --shell-exec \
 
 - **信任边界 = 局域网**：broker `allow_anonymous true`，`/api/join` 免口令登记入队，面板与 API 全匿名可读（服务端 conf 与 `bus_server.py` 实测一致）。
 - **已移除逐节点凭据**：不再发放 MQTT 独立账号（PBKDF2）/ HTTP Bearer 令牌（见 git `4c805e7`）；`scripts/add_node.py` 保留为历史凭据管理工具。
-- **控制面独立配对**（架构 v0.4 §6.1）：主控机生成**一次性安装码**（8 位短码、15 分钟有效、仅本机 API 可生成）→ 人工输入受控机 → 两端各自本地派生配对密钥 `K=HKDF(码)`（码零网络传输）→ `/api/pair` proof 校验后码即作废。之后 hub 发控制命令带 `HMAC(K)` 签名，worker 验签通过才执行——**无 K 无法伪造控制消息**。
+- **控制面独立配对**（架构 v0.4 §6.1）：主控面板由**人类设定一次性配对密码**（可含任意字符 1-64 位、15 分钟有效、仅本机 API 可设定）→ 密码人工告知受控机（提示词或人工托盘输入）→ 两端各自本地派生配对密钥 `K=HKDF(密码)`（密码不落网、不落盘）→ `/api/pair` proof 校验后密码即作废。之后 hub 发控制命令带 `HMAC(K)` 签名，worker 验签通过才执行——**无 K 无法伪造控制消息**。
 - **验签 ≠ 加密**：只做 HMAC 验签（防伪造，微秒级），不做消息加密（局域网可信，偷听已排除）；TLS 仅公网部署需要（见 `docs/broker_setup.md`）。
 - **仅限可信局域网**：任何能访问 `1883/8000` 端口的设备都可入队并读到全部消息。跨网/公网部署需恢复认证或加 TLS。
 

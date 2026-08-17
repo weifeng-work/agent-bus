@@ -123,12 +123,13 @@
   <h2>安全设置（控制面配对）<span style="font-size:11px;color:var(--muted);font-weight:400;">仅主机本机可操作</span></h2>
   <div style="display:flex;flex-wrap:wrap;gap:16px;margin-bottom:8px;">
     <div style="flex:1;min-width:280px;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px;">
-      <div style="font-weight:600;margin-bottom:6px;">一次性安装码</div>
-      <div style="font-size:12px;color:var(--muted);margin-bottom:10px;">受控机安装时输入（setup_worker 的 <code>-PairCode</code>）。8 位、15 分钟有效、一次性；码不落网，两端各自本地派生密钥。</div>
-      <button onclick="genCode()" style="padding:6px 14px;background:var(--brand);color:#fff;border:none;border-radius:8px;cursor:pointer;">生成安装码</button>
-      <div id="codeBox" style="display:none;margin-top:10px;font-family:'SF Mono',Consolas,monospace;font-size:16px;background:#eef0f7;border:1px solid var(--border);border-radius:8px;padding:10px 12px;">
-        <b id="codeText"></b> <span id="codeExp" style="font-size:12px;color:var(--muted);"></span>
-        <button onclick="copyCode()" style="margin-left:8px;padding:4px 10px;border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:12px;">复制</button>
+      <div style="font-weight:600;margin-bottom:6px;">设定配对密码</div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:10px;">人工决定的一次性密码（大小写/数字/符号均可，1-64 位）。15 分钟有效、配对成功即作废；密码不落网。把密码告知受控机（智能体提示词或人工在受控机托盘输入）。</div>
+      <input id="pairPass" type="password" placeholder="人类设定的配对密码"
+             style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;box-sizing:border-box;margin-bottom:8px;font-size:13px;">
+      <button onclick="setCode()" style="padding:6px 14px;background:var(--brand);color:#fff;border:none;border-radius:8px;cursor:pointer;">设定配对密码</button>
+      <div id="codeBox" style="display:none;margin-top:10px;font-size:12px;background:#eef0f7;border:1px solid var(--border);border-radius:8px;padding:10px 12px;">
+        已设定：<span id="codeText"></span>
       </div>
       <div id="codeErr" style="color:#c53030;font-size:12px;margin-top:8px;min-height:14px;"></div>
     </div>
@@ -363,32 +364,25 @@ function switchTab(name) {
     p.classList.toggle("active", p.id === "pane-" + name));
 }
 
-// ---- 安全设置：控制面配对（一次性安装码 / 已配对节点 / 重置） ----
-let lastCode = "";
+// ---- 安全设置：控制面配对（人工设定密码 / 已配对节点 / 重置） ----
 
-async function genCode() {
+async function setCode() {
+  const pw = document.getElementById("pairPass").value;
   const err = document.getElementById("codeErr");
   err.textContent = "";
+  if (!pw) { err.textContent = "请输入配对密码"; return; }
   try {
-    const r = await fetch("/api/control/codes", { method: "POST" });
-    if (!r.ok) {
-      const d = await r.json().catch(() => ({}));
-      err.textContent = d.detail || "生成失败（仅主机本机可操作）";
-      return;
-    }
+    const r = await fetch("/api/control/setcode", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ passphrase: pw }),
+    });
+    if (!r.ok) { err.textContent = (await r.json()).detail || "设定失败（仅主机本机可操作）"; return; }
     const j = await r.json();
-    lastCode = j.code;
-    document.getElementById("codeText").textContent = j.code;
-    document.getElementById("codeExp").textContent = "· 有效期至 " + fmt(j.expires_at) + "（一次性）";
+    document.getElementById("codeText").textContent =
+      "有效期至 " + fmt(j.expires_at) + "（一次性，配对成功即作废）";
     document.getElementById("codeBox").style.display = "block";
+    document.getElementById("pairPass").value = "";
   } catch (e) { err.textContent = "网络错误"; }
-}
-
-function copyCode() {
-  if (!lastCode) return;
-  if (navigator.clipboard) navigator.clipboard.writeText(lastCode)
-    .then(() => alert("已复制: " + lastCode)).catch(() => {});
-  else alert("安装码: " + lastCode);
 }
 
 async function loadPairs() {

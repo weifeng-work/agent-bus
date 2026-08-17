@@ -190,7 +190,11 @@ class CommNode:
     # ---------------- 控制面配对（需求2 §6.1） ----------------
 
     def _load_or_pair(self):
-        """worker：读本地 control.json（K）；无则用 --pair-code 配对一次。"""
+        """worker：读本地 control.json（K）；无则用 --pair-code 配对一次。
+
+        未配对不阻塞安装/运行：节点照常上线，控制面暂不可用；
+        可在托盘菜单『输入配对码』或下次带 --pair-code 补配对。
+        """
         cfg_dir = Path.home() / ".config" / "agent-bus"
         self.control_file = cfg_dir / "control.json"
         ctrl = load_json(self.control_file, {})
@@ -203,13 +207,27 @@ class CommNode:
         if ctrl.get("key_b64"):
             log.warning("本地 K 属于 %s，与当前节点 %s 不匹配，需重新配对",
                         ctrl.get("agent_id"), self.agent_id)
-        if not code:
-            log.warning("未配对：无本地 K 且未提供 --pair-code。shell 控制能力不可用")
+        if code:
+            ok, msg = self.pair_with_password(code)
+            if ok:
+                return
+            log.error("配对失败: %s", msg)
             return
-        # 一次性配对：本地派生 K → POST /api/pair（码不落网、不落盘）
-        key = crypto.derive_pair_key(code)
-        code_hash = hashlib.sha256(code.encode("utf-8")).hexdigest()
-        claim = {"agent_id": self.agent_id, "device_name": self.name, "code_hash": code_hash}
+        log.info("未配对：控制面暂不可用。可在托盘菜单『输入配对码』补配对，"
+                 "或下次启动带 --pair-code <密码>")
+
+    def pair_with_password(self, passphrase: str):
+        """人工/CLI 输入配对密码 → 本地派生 K → /api/pair → 存 control.json。
+
+        密码只在内存中派生 K，不落网、不落盘；配对成功后密码即作废（一次性）。
+        返回 (ok, message)。
+        """
+        if not passphrase:
+            return False, "配对密码为空"
+        key = crypto.derive_pair_key(passphrase)
+        pw_hash = hashlib.sha256(passphrase.encode("utf-8")).hexdigest()
+        claim = {"agent_id": self.agent_id, "device_name": self.name,
+                 "code_hash": pw_hash}
         proof = crypto.hmac_sign(key, claim)
         try:
             import urllib.request
@@ -220,17 +238,16 @@ class CommNode:
             with urllib.request.urlopen(req, timeout=15) as r:
                 body = json.loads(r.read().decode("utf-8"))
         except Exception as e:
-            log.error("配对失败: %s（安装码无效/过期或 bus_server 不可达）", e)
-            return
+            return False, f"配对请求失败（bus_server 不可达）: {e}"
         if body.get("ok"):
             self.control_key = key
             self.control_key_b64 = base64.b64encode(key).decode("ascii")
             save_json(self.control_file, {"agent_id": self.agent_id,
                                           "key_b64": self.control_key_b64,
                                           "paired_at": time.time()})
-            log.info("控制配对成功（安装码已作废），K 已存 %s", self.control_file)
-        else:
-            log.error("配对被拒: %s", body)
+            log.info("控制配对成功（密码一次性，已作废），K 存 %s", self.control_file)
+            return True, "配对成功"
+        return False, f"配对被拒: {body.get('detail', body)}"
 
     def _load_hub_keys(self):
         """hub：读 bus_server 写出的 runtime/control_keys.json（同机共享）。"""

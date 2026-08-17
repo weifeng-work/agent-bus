@@ -15,7 +15,6 @@ import json
 import logging
 import os
 import platform as _platform
-import secrets
 import sqlite3
 import sys
 import threading
@@ -292,16 +291,11 @@ class MqttBridge:
 
 
 # ---------------------------------------------------------------------------
-# 控制面配对（M3，架构 §6.1）：一次性安装码 + 本地派生密钥
+# 控制面配对（M3，架构 §6.1）：人工设定一次性密码 + 本地派生密钥
 # ---------------------------------------------------------------------------
 
-PAIR_CODE_CHARS = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"  # 去易混淆字符
 PAIR_CODE_TTL = 900.0                                # 15 分钟
-_pending_codes = {}  # code_hash -> {"key_b64", "expires_at"}（进程内，重启即失效）
-
-
-def _gen_pair_code() -> str:
-    return "".join(secrets.choice(PAIR_CODE_CHARS) for _ in range(8))
+_pending_codes = {}  # 密码哈希 -> {"key_b64", "expires_at"}（进程内，重启即失效）
 
 
 def _write_control_keys(store: Store):
@@ -396,7 +390,7 @@ def create_app(store: Store, files_dir: Path, bridge: MqttBridge,
         log.info("节点已移除: %s by %s", agent_id, ident.get("agent_id"))
         return {"ok": True, "agent_id": agent_id}
 
-    # ---- 控制面配对（M3）：一次性安装码 + proof 校验 ----
+    # ---- 控制面配对（M3）：人工设定密码 + proof 校验 ----
 
     def local_only(request: Request):
         if not request.client or request.client.host not in ("127.0.0.1", "::1"):
@@ -405,33 +399,41 @@ def create_app(store: Store, files_dir: Path, bridge: MqttBridge,
     class PairBody(BaseModel):
         agent_id: str = ""
         device_name: str = ""
-        code_hash: str = ""   # worker 本地算的码哈希（定位码，不含 K）
-        proof: str = ""       # HMAC(K, "pairing")，K 由码本地派生
+        code_hash: str = ""   # worker 本地算的密码哈希（定位，不含密码/K）
+        proof: str = ""       # HMAC(K, "pairing")，K 由密码本地派生
 
-    @app.post("/api/control/codes")
-    def gen_pair_code(request: Request):
-        """生成一次性安装码（仅本机 127.0.0.1）：8 位、15 分钟有效、一次性。"""
+    class SetCodeBody(BaseModel):
+        passphrase: str = ""
+
+    @app.post("/api/control/setcode")
+    def set_pair_code(body: SetCodeBody, request: Request):
+        """人工设定配对密码（仅本机）：一次性、15 分钟有效、配对成功即作废。
+
+        密码由主控人类决定（大小写/数字/符号均可，1-64 位），只在面板输入
+        瞬间本地派生 K=HKDF(密码)，密码本身不落网、不落盘。
+        """
         local_only(request)
-        code = _gen_pair_code()
-        key = crypto.derive_pair_key(code)
-        code_hash = hashlib.sha256(code.encode("utf-8")).hexdigest()
-        _pending_codes[code_hash] = {
+        pw = body.passphrase
+        if not (1 <= len(pw) <= 64):
+            raise HTTPException(400, "配对密码长度需 1-64")
+        key = crypto.derive_pair_key(pw)
+        pw_hash = hashlib.sha256(pw.encode("utf-8")).hexdigest()
+        _pending_codes[pw_hash] = {
             "key_b64": base64.b64encode(key).decode("ascii"),
             "expires_at": time.time() + PAIR_CODE_TTL,
         }
-        log.info("安装码已生成（15 分钟有效，一次性）")
-        return {"ok": True, "code": code,
-                "expires_at": time.time() + PAIR_CODE_TTL}
+        log.info("配对密码已设定（15 分钟有效，一次性）")
+        return {"ok": True, "expires_at": time.time() + PAIR_CODE_TTL}
 
     @app.post("/api/pair")
     def pair(body: PairBody):
-        """worker 配对：按 code_hash 定位码 → proof 校验 → 登记 K（hub 同机读取）。"""
+        """worker 配对：按密码哈希定位 → proof 校验 → 登记 K（hub 同机读取）。"""
         agent_id = (body.agent_id or "").strip()
         if not provision.valid_agent_id(agent_id):
             raise HTTPException(400, "agent_id 非法（限 [A-Za-z0-9_-]，1-64 位）")
         pend = _pending_codes.get((body.code_hash or "").strip())
         if not pend or pend["expires_at"] < time.time():
-            raise HTTPException(401, "安装码无效或已过期")
+            raise HTTPException(401, "配对密码无效或已过期")
         key = base64.b64decode(pend["key_b64"])
         claim = {"agent_id": agent_id, "device_name": body.device_name,
                  "code_hash": body.code_hash}
