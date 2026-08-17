@@ -6,7 +6,7 @@
 
 子设备侧 scan_teams()：绑定 41830 收集 timeout 秒内的 beacon，按 team_id 去重。
 
-安全：beacon 不含任何凭据；口令核对发生在 HTTP /api/join。
+安全：beacon 不含任何凭据；入队即匿名登记于 HTTP /api/join（v2 匿名化后无口令）。
 选广播而非组播：零配置（组播需 join group，跨 AP/网段行为更不可控），
 代价是部分路由器 AP 隔离下不可达——保留手动输 IP 的回退路径。
 """

@@ -7,12 +7,13 @@
   1. 确保依赖（paho-mqtt fastapi uvicorn requests，缺则 pip 装）
   2. broker 就绪:
      - Windows: 下载 mosquitto 便携 zip 解压到 data/runtime/mosquitto（零 UAC），
-       以用户态进程启动（listener 1883 0.0.0.0 + 禁匿名 + passwd/ACL 全在 data/auth）
+       以用户态进程启动（listener 1883 0.0.0.0 + allow_anonymous true，局域网可信边界）
      - Linux:   优先复用已装 mosquitto（apt/服务均可），无则提示一条 apt 命令
        （需一次 sudo；跑用户态实例时不占系统 1883、用 --broker-port 区分）
-  3. 初始化桥接账号 + 管理员令牌（data/credentials.json）
+  3. 生成 broker 配置（匿名直连；历史版本曾发放节点凭据到 data/credentials.json，
+     v2 匿名化后不再需要——add_node.py 仅作遗留管理）
   4. 启动 bus_server（data/server.pid），beacon 广播待队伍初始化后自动开始
-  5. 打开浏览器面板 → 首次向导设定队伍名 + 加入口令 → 全部完成
+  5. 打开浏览器面板 → 首次向导设定队伍名 → 全部完成
 
 人工确认点: Windows 首次监听会弹防火墙确认（点"允许"）；Linux 装 mosquitto 需一次 sudo。
 """

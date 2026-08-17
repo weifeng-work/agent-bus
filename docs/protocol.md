@@ -186,14 +186,15 @@ Agent 启动后发布到 `bus/register`（retain=true，新加入者可立即获
 ```
 
 - `ips`：主机全部私网候选地址（多网卡/虚拟网卡/代理 TUN 场景无法给出唯一答案）
-- beacon 不含任何凭据；口令核对发生在 HTTP `POST /api/join`
+- beacon 不含任何凭据；入队即匿名登记于 HTTP `POST /api/join`（v2 匿名化后无口令核对）
 - 选广播而非组播：零配置；代价是 AP 隔离下不可达——保留 `--host` 手动回退
 
 ### 5.2 加入流程（发现 ≠ 连通）
 
 1. 子设备 `scan_teams()` 绑定 41830 收集 beacon（按 team_id 去重，`host_ips` 取并集）
 2. **连通性自检**：逐候选探测 `http://{ip}:{http_port}/api/health`，选第一个可达 IP
-3. `POST /api/join`（口令）→ 服务端自动发凭据并重启用户态 broker
-4. 凭据落 `~/.config/agent-bus/bus.env`，立即连 MQTT 注册验证上线
+3. `POST /api/join`（匿名登记 agent_id/设备名）→ 返回 broker 连接信息
+4. 连接配置落 `~/.config/agent-bus/bus.env`，立即连 MQTT 注册验证上线
 
-安全：`/api/join` 为唯一匿名业务端点，口令错误按 IP 计数（5 次锁 5 分钟）。
+安全：信任边界为局域网——`/api/join` 匿名放行，任何可访问 8000/1883 端口的设备
+均可入队并读取全部消息；公网部署需恢复认证或加 TLS（见 `docs/broker_setup.md`）。

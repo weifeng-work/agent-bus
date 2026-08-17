@@ -1,8 +1,7 @@
 """HTTP 文件服务客户端（Claim-Check 上传/下载）与在线名单查询。
 
-服务端已启用令牌认证：所有 /api/* 请求需带 Authorization: Bearer <token>
-（或 ?token= 查询参数，用于浏览器直接下载链接）。
-"""
+v2 匿名化（git 4c805e7）后服务端全匿名，无需认证头；_auth_kwargs 保留
+token 参数仅为兼容恢复认证模式或携带环境变量令牌的场景（token 为空即不带）。"""
 import os
 import urllib.parse
 

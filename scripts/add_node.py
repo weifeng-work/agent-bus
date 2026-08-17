@@ -1,6 +1,9 @@
 """节点凭据开通工具（在 broker 机器上运行）——薄 CLI 封装。
 
-核心逻辑在 agent_bus/provision.py（与 bus_server 的 /api/join 共用）。
+> 遗留工具：v2 匿名化（git 4c805e7）后，常规入队走 join_team.py 匿名直连，
+> 不再发放节点凭据。本工具仅用于历史凭据的增删查（如日后恢复认证模式时）。
+
+核心逻辑在 agent_bus/provision.py（历史版本与 bus_server 的 /api/join 共用）。
 
 用法:
   # 首次初始化（生成桥接账号 + 管理员令牌 + ACL/passwd 骨架）

@@ -1,6 +1,11 @@
-"""凭据开通核心逻辑（服务端 /api/join 与 scripts/add_node.py 共用）。
+"""（遗留）凭据开通逻辑 —— v2 匿名化（git 4c805e7）后，bus_server 的 /api/join
+与 join_team.py 均改为匿名直连，不再发放 MQTT 密码 / HTTP 令牌。
 
-职责：
+本模块当前仅由两类场景使用：
+  - scripts/add_node.py：历史凭据的增删查（如日后恢复认证模式时）
+  - 工具函数：get_local_ips / get_local_ip / valid_agent_id（discovery、server 共用）
+
+历史职责（不再生效）：
   - 生成 MQTT 密码 / HTTP 令牌
   - 写 mosquitto passwd（PBKDF2 哈希，由 mosquitto_passwd 工具完成）
   - HTTP 令牌写入 bus.db（http_tokens 表），重置节点时先删旧令牌（防幽灵令牌）
