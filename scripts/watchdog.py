@@ -10,6 +10,7 @@
   python scripts/watchdog.py --install-dir C:\\agent-bus
 """
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -43,7 +44,6 @@ def main():
     runtime = install / "data" / "runtime"
     pid_file = runtime / "tray_shell.pid"
     hb_file = runtime / "tray_heartbeat.ts"
-    bat = install / "start_tray.bat"
 
     # 判活
     alive = False
@@ -57,19 +57,27 @@ def main():
     if alive:
         return  # 壳活着，无操作
 
-    # 壳不在/假活 → 拉起
-    if not bat.exists():
-        sys.exit(f"start_tray.bat 不存在: {bat}（先运行 setup_tray.ps1）")
-    print(f"watchdog: 托盘壳不在/失联，拉起 {bat}")
+    # 壳不在/假活 → 以 pythonw 直启（无黑窗口），命令行来自 shell_launch.json
+    launch_file = runtime / "shell_launch.json"
+    if not launch_file.exists():
+        sys.exit("shell_launch.json 不存在（节点从未启动过？请先运行 setup_tray.ps1）")
+    try:
+        spec = json.loads(launch_file.read_text(encoding="utf-8"))
+        args = [spec["exe"]] + list(spec.get("args", []))
+        cwd = spec.get("cwd") or str(install)
+    except Exception as e:
+        sys.exit(f"shell_launch.json 解析失败: {e}")
+
+    print(f"watchdog: 托盘壳不在/失联，以 pythonw 直启（无窗口）args={args}")
     try:
         if os.name == "nt":
             subprocess.Popen(
-                ["cmd", "/c", "start", "", "/min", str(bat)],
-                creationflags=subprocess.DETACHED_PROCESS
-                | subprocess.CREATE_NEW_PROCESS_GROUP,
+                args,
+                cwd=cwd,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 close_fds=True)
         else:
-            subprocess.Popen([str(bat)], start_new_session=True, close_fds=True)
+            subprocess.Popen(args, cwd=cwd, start_new_session=True, close_fds=True)
     except Exception as e:
         sys.exit(f"watchdog: 拉起失败 {e}")
 

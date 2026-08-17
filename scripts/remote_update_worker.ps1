@@ -42,8 +42,17 @@ Get-CimInstance Win32_Process |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 Start-Sleep 1
 
-# 4. 恢复计划任务并重启节点（新代码）
-schtasks /change /tn AgentBusShell /enable
-schtasks /change /tn AgentBusShellWatchdog /enable
-Start-Process "$InstallDir\start_tray.bat"
+# 4. 恢复计划任务并重启节点（新代码，pythonw 无窗口）
+schtasks /change /tn AgentBusShell /enable 2>$null
+schtasks /change /tn AgentBusShellWatchdog /enable 2>$null
+# 直接 pythonw 拉起（读 shell_launch.json；否则回退 start_tray.bat）
+$launchJson = "$InstallDir\data\runtime\shell_launch.json"
+if (Test-Path $launchJson) {
+    $spec = Get-Content $launchJson -Raw | ConvertFrom-Json
+    $exe = $spec.exe
+    $launchArgs = $spec.args
+    Start-Process -FilePath $exe -ArgumentList $launchArgs -WindowStyle Hidden -WorkingDirectory $spec.cwd
+} else {
+    Start-Process "$InstallDir\start_tray.bat"
+}
 Write-Host "node restarted"

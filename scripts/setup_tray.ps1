@@ -4,9 +4,9 @@
 #   1. 读取设备身份（~/.config/agent-bus/device.json，join_team 写入）
 #   2. 生成 start_tray.bat（以用户会话启动 comm_node.py）
 #   3. 删除旧版直启执行器任务 AgentBus<Executor>（升级兼容）
-#   4. 注册计划任务:
-#        AgentBusShell          /sc onlogon      → start_tray.bat（登录即起）
-#        AgentBusShellWatchdog  /sc minute /mo 1 → scripts/watchdog.py（分钟级兜底）
+#   4. 注册计划任务（pythonw 直启 + 隐藏，无黑窗）:
+#        AgentBusShell          /sc onlogon      → pythonw executor\comm_node.py（登录即起）
+#        AgentBusShellWatchdog  /sc minute /mo 1 → pythonw scripts\watchdog.py（分钟级兜底）
 #   5. 立即启动托盘壳
 #
 # 用法:
@@ -37,6 +37,17 @@ foreach ($c in @("python", "py")) {
     }
 }
 if (-not $py) { throw "未找到 Python 3.10+，请先安装（可运行 setup_worker_windows.ps1 自动安装）" }
+
+# ---------- 0.2 解析 pythonw（无控制台窗口，避免受控机弹黑窗） ----------
+function Resolve-PythonW {
+    $c = Get-Command pythonw -ErrorAction SilentlyContinue
+    if ($c) { return $c.Source }
+    $c = Get-Command pyw -ErrorAction SilentlyContinue
+    if ($c) { return $c.Source }
+    if ($py -eq "py") { return "pyw" }
+    return "pythonw"
+}
+$pyw = Resolve-PythonW
 
 # ---------- 0.5 安装目录权限自适应（与 setup_worker 一致） ----------
 function Test-DirWritable([string]$dir) {
@@ -69,23 +80,48 @@ Write-Host "== Agent Bus 通信节点安装 ==" -ForegroundColor Cyan
 Write-Host "  agent_id : $AgentId"
 Write-Host "  executor : $Executor"
 
-# ---------- 2. start_tray.bat（不嵌配对密码：密码只在安装时一次性使用） ----------
+# ---------- 2. 启动参数（单一来源：任务 / 批处理 / launch json 共用） ----------
 $logFile = "$InstallDir\data\tray_shell.log"
 # 节点身份与执行器身份分离（架构 §3）：node-<agent> 收控制消息，执行器用原 agent_id
 $nodeId = "node-$AgentId"
-$shellArg = if ($EnableShellControl) { "--enable-shell-control" } else { "" }
+$shellArgs = @(
+    "--role", "worker",
+    "--agent-id", $nodeId,
+    "--executor-agent-id", $AgentId,
+    "--name", $Name,
+    "--executor", $Executor,
+    "--install-dir", $InstallDir
+)
+if ($EnableShellControl) { $shellArgs += "--enable-shell-control" }
+# 含空格参数加引号
+$shellArgsStr = ($shellArgs | ForEach-Object {
+    if ($_ -match '\s') { "`"$_`"" } else { $_ }
+}) -join " "
+
+# start_tray.bat（仅手动双击用，已改用 pythonw，不弹黑窗）
 $bat = @"
 @echo off
 cd /d $InstallDir
-start "" /min cmd /c "$py executor\comm_node.py --role worker --agent-id $nodeId --executor-agent-id $AgentId --name `"$Name`" --executor $Executor --install-dir $InstallDir $shellArg > `"$logFile`" 2>&1"
+start "" pythonw.exe executor\comm_node.py $shellArgsStr > "$logFile" 2>&1
 "@
 Set-Content -Path "$InstallDir\start_tray.bat" -Value $bat -Encoding ASCII
-Write-Host "  已生成: $InstallDir\start_tray.bat（节点身份 $nodeId）"
+Write-Host "  已生成: $InstallDir\start_tray.bat（节点身份 $nodeId，pythonw 无窗口）"
+
+# shell_launch.json：供 watchdog / 远程更新无窗口重启（pythonw 直启，不经过 .bat/cmd）
+$runtimeDir = "$InstallDir\data\runtime"
+if (-not (Test-Path $runtimeDir)) { New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null }
+$launchSpec = [ordered]@{
+    exe  = $pyw
+    args = $shellArgs
+    cwd  = $InstallDir
+} | ConvertTo-Json -Compress
+Set-Content -Path "$runtimeDir\shell_launch.json" -Value $launchSpec -Encoding UTF8
+Write-Host "  已生成: $runtimeDir\shell_launch.json（watchdog 无窗口重启用）"
 
 # ---------- 2.5 一次性配对（若给了 -PairCode；成功后密码即作废，不落盘不残留） ----------
 if ($PairCode) {
     Write-Host "  配对中（一次性密码）..."
-    & cmd /c "cd /d $InstallDir && $py executor\comm_node.py --role worker --agent-id $nodeId --headless --no-bus --pair-code `"$PairCode`" --test-seconds 1"
+    & cmd /c "cd /d $InstallDir && $pyw executor\comm_node.py --role worker --agent-id $nodeId --headless --no-bus --pair-code `"$PairCode`" --test-seconds 1"
     $ctrlFile = "$env:USERPROFILE\.config\agent-bus\control.json"
     $paired = $false
     if (Test-Path $ctrlFile) {
@@ -101,20 +137,30 @@ if ($PairCode) {
 # ---------- 3. 删除旧版直启任务（升级兼容） ----------
 schtasks /delete /tn "AgentBus$Executor" /f 2>$null | Out-Null
 
-# ---------- 4. 注册计划任务 ----------
-# watchdog 走独立 bat（避免 schtasks /tr 引号嵌套问题）
-$wdBat = @"
-@echo off
-cd /d $InstallDir
-$py scripts\watchdog.py --install-dir $InstallDir
-"@
-Set-Content -Path "$InstallDir\watchdog.bat" -Value $wdBat -Encoding ASCII
-schtasks /create /tn "AgentBusShell" /tr "`"$InstallDir\start_tray.bat`"" /sc onlogon /f | Out-Null
-schtasks /create /tn "AgentBusShellWatchdog" /tr "`"$InstallDir\watchdog.bat`"" /sc minute /mo 1 /f | Out-Null
-Write-Host "  计划任务: AgentBusShell(onlogon) + AgentBusShellWatchdog(每分钟)"
+# ---------- 4. 注册计划任务（pythonw 直启 + 隐藏，杜绝黑窗） ----------
+# 用工件命令直接注册，不经过 .bat / cmd，避免任何控制台窗口。
+$shellCmd = "`"$pyw`" executor\comm_node.py $shellArgsStr"
+$wdCmd    = "`"$pyw`" scripts\watchdog.py --install-dir `"$InstallDir`""
+schtasks /create /tn "AgentBusShell" /tr $shellCmd /sc onlogon /f | Out-Null
+schtasks /create /tn "AgentBusShellWatchdog" /tr $wdCmd /sc minute /mo 1 /f | Out-Null
+# 设为隐藏运行（任务计划程序里不弹窗）
+function Set-TaskHidden([string]$n) {
+    try {
+        $t = Get-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue
+        if ($t) { $t.Settings.Hidden = $true; $t | Set-ScheduledTask | Out-Null }
+    } catch {}
+}
+Set-TaskHidden "AgentBusShell"
+Set-TaskHidden "AgentBusShellWatchdog"
+Write-Host "  计划任务: AgentBusShell(onlogon, 隐藏) + AgentBusShellWatchdog(每分钟, 隐藏)"
 
-# ---------- 5. 启动托盘壳 ----------
-Start-Process "$InstallDir\start_tray.bat"
+# ---------- 5. 启动托盘壳（pythonw 直启，隐藏窗口） ----------
+# 幂等：先清理本机已有节点进程，避免重复实例（重装/升级场景）
+Get-CimInstance Win32_Process |
+  Where-Object { $_.CommandLine -match 'comm_node|_executor\.py' } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+Start-Sleep 1
+Start-Process -FilePath $pyw -ArgumentList $shellArgs -WindowStyle Hidden -WorkingDirectory $InstallDir
 Write-Host ""
 Write-Host "== 完成 ==" -ForegroundColor Green
 Write-Host "  托盘壳已启动（状态灯: 绿=已连接 / 黄=重连中 / 灰=已停止）"

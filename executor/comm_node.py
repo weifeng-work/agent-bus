@@ -53,6 +53,10 @@ from agent_bus import crypto  # noqa: E402
 
 log = logging.getLogger("comm_node")
 
+# Windows 无控制台窗口标志：受控机全程用 pythonw 直启，杜绝黑窗口闪现。
+# 非 Windows 平台该常量不存在，getattr 回退为 0（无影响）。
+CW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 # ---------------------------------------------------------------------------
 # 常量
 # ---------------------------------------------------------------------------
@@ -340,10 +344,12 @@ class CommNode:
             log.info("拉起执行器子进程: %s", " ".join(cmd) if isinstance(cmd, str) else cmd)
             try:
                 if isinstance(cmd, str):
-                    self.child = subprocess.Popen(cmd, shell=True, env=self._child_env())
+                    self.child = subprocess.Popen(cmd, shell=True, env=self._child_env(),
+                                                  creationflags=CW)
                 else:
                     self.child = subprocess.Popen(
-                        cmd, cwd=str(self.install_dir), env=self._child_env())
+                        cmd, cwd=str(self.install_dir), env=self._child_env(),
+                        creationflags=CW)
                 self._respawn_count += 1
             except Exception as e:
                 log.error("拉起子进程失败: %s", e)
@@ -570,7 +576,7 @@ class CommNode:
         started = time.time()
         try:
             r = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True,
-                               timeout=timeout)
+                               timeout=timeout, creationflags=CW)
             out = _decode_bytes(r.stdout) + ("\n" + _decode_bytes(r.stderr) if r.stderr else "")
             out = out[:OUTPUT_LIMIT]
             self._reply(msg, status="success" if r.returncode == 0 else "error",
@@ -611,6 +617,18 @@ class CommNode:
 
     def run(self):
         # 节点自身总线连接（worker 收 shell_exec / hub 发控制消息）
+        # 持久化工件启动命令行（pythonw 直启，供 watchdog / 远程更新无窗口重启）
+        if self.role == "worker" and not self.no_bus:
+            self._persist_launch_cmd()
+        # 日志落盘（pythonw 无控制台，必须写文件才能排查）
+        try:
+            fh = logging.FileHandler(self.data_dir / "tray_shell.log",
+                                    encoding="utf-8", delay=True)
+            fh.setFormatter(logging.Formatter(
+                "%(asctime)s [%(levelname)s] %(message)s"))
+            log.addHandler(fh)
+        except Exception:
+            pass
         self.connect_bus()
         # 监督 + 心跳线程（GUI/headless 共用）
         threads = [
@@ -640,6 +658,25 @@ class CommNode:
                 time.sleep(0.5)
         except KeyboardInterrupt:
             pass
+
+    def _persist_launch_cmd(self):
+        """把本进程的实际启动命令行写到 runtime/shell_launch.json。
+
+        供 watchdog（分钟级兜底）与远程更新脚本无窗口重启使用：
+        直接以 pythonw 进程启动同一命令，不经过 .bat / cmd，从而不弹黑窗口。
+        仅在持久化工件（非配对自检 --no-bus）时写入，避免把一次性配对命令固化。
+        """
+        try:
+            self.runtime_dir.mkdir(parents=True, exist_ok=True)
+            launch = {
+                "exe": sys.executable,  # 若为 pythonw 则无控制台
+                "args": sys.argv[1:],
+                "cwd": str(self.install_dir),
+            }
+            (self.runtime_dir / "shell_launch.json").write_text(
+                json.dumps(launch, ensure_ascii=False), encoding="utf-8")
+        except Exception as e:
+            log.warning("写入 shell_launch.json 失败: %s", e)
 
     def shutdown(self):
         self._stop.set()
