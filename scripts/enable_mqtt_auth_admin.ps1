@@ -1,4 +1,4 @@
-# Run as Administrator (one-time): enable mosquitto auth and restart service.
+﻿# Run as Administrator (one-time): enable mosquitto auth and restart service.
 #   powershell -ExecutionPolicy Bypass -File scripts\enable_mqtt_auth_admin.ps1
 # Idempotent: safe to re-run. Rollback: copy the .bak conf back + Restart-Service mosquitto.
 # NOTE: keep this file ASCII-only (Windows PowerShell 5.1 parses non-BOM files as ANSI).

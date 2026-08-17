@@ -1,4 +1,4 @@
-# Agent Bus Windows 子设备一键加入（通用智能体执行器）
+﻿# Agent Bus Windows 子设备一键加入（通用智能体执行器）
 #
 # 在目标 Windows 机器上以【普通权限】PowerShell 运行（目标机上智能体给一句提示词即可触发）:
 #
