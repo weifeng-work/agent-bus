@@ -69,19 +69,34 @@ Write-Host "== Agent Bus 通信节点安装 ==" -ForegroundColor Cyan
 Write-Host "  agent_id : $AgentId"
 Write-Host "  executor : $Executor"
 
-# ---------- 2. start_tray.bat ----------
+# ---------- 2. start_tray.bat（不嵌配对密码：密码只在安装时一次性使用） ----------
 $logFile = "$InstallDir\data\tray_shell.log"
 # 节点身份与执行器身份分离（架构 §3）：node-<agent> 收控制消息，执行器用原 agent_id
 $nodeId = "node-$AgentId"
-$pairArg  = if ($PairCode) { "--pair-code $PairCode" } else { "" }
 $shellArg = if ($EnableShellControl) { "--enable-shell-control" } else { "" }
 $bat = @"
 @echo off
 cd /d $InstallDir
-start "" /min cmd /c "$py executor\comm_node.py --role worker --agent-id $nodeId --executor-agent-id $AgentId --name `"$Name`" --executor $Executor --install-dir $InstallDir $pairArg $shellArg > `"$logFile`" 2>&1"
+start "" /min cmd /c "$py executor\comm_node.py --role worker --agent-id $nodeId --executor-agent-id $AgentId --name `"$Name`" --executor $Executor --install-dir $InstallDir $shellArg > `"$logFile`" 2>&1"
 "@
 Set-Content -Path "$InstallDir\start_tray.bat" -Value $bat -Encoding ASCII
 Write-Host "  已生成: $InstallDir\start_tray.bat（节点身份 $nodeId）"
+
+# ---------- 2.5 一次性配对（若给了 -PairCode；成功后密码即作废，不落盘不残留） ----------
+if ($PairCode) {
+    Write-Host "  配对中（一次性密码）..."
+    & cmd /c "cd /d $InstallDir && $py executor\comm_node.py --role worker --agent-id $nodeId --headless --no-bus --pair-code `"$PairCode`" --test-seconds 1"
+    $ctrlFile = "$env:USERPROFILE\.config\agent-bus\control.json"
+    $paired = $false
+    if (Test-Path $ctrlFile) {
+        try { $paired = ((Get-Content $ctrlFile -Raw | ConvertFrom-Json).agent_id -eq $nodeId) } catch {}
+    }
+    if ($paired) {
+        Write-Host "  配对成功 ✓（控制面已激活，密码已作废）" -ForegroundColor Green
+    } else {
+        Write-Host "  配对未完成（密码无效/过期？）：节点照常运行，装完可在托盘『输入配对码』补配对" -ForegroundColor Yellow
+    }
+}
 
 # ---------- 3. 删除旧版直启任务（升级兼容） ----------
 schtasks /delete /tn "AgentBus$Executor" /f 2>$null | Out-Null
