@@ -1,4 +1,4 @@
-# Agent Bus 通信节点（托盘壳）安装 —— 计划任务注册 + 启动（需求1 三层自愈）
+﻿# Agent Bus 通信节点（托盘壳）安装 —— 计划任务注册 + 启动（需求1 三层自愈）
 #
 # 做什么:
 #   1. 读取设备身份（~/.config/agent-bus/device.json，join_team 写入）
@@ -134,24 +134,34 @@ if ($PairCode) {
     }
 }
 
-# ---------- 3. 删除旧版直启任务（升级兼容） ----------
-schtasks /delete /tn "AgentBus$Executor" /f 2>$null | Out-Null
+# ---------- 3. 删除旧版直启任务（升级兼容，幂等） ----------
+# 用 PowerShell 原生 API 删除，避免 schtasks 在任务不存在时把 stderr 当终止错误中断脚本
+$oldTask = Get-ScheduledTask -TaskName "AgentBus$Executor" -ErrorAction SilentlyContinue
+if ($oldTask) {
+    Unregister-ScheduledTask -TaskName "AgentBus$Executor" -Confirm:$false -ErrorAction SilentlyContinue
+}
 
 # ---------- 4. 注册计划任务（pythonw 直启 + 隐藏，杜绝黑窗） ----------
+# 用 PowerShell 原生 Register-ScheduledTask 注册：
+#   - 不受 schtasks /tr 261 字符上限限制（长 java/pythonw 路径+参数也能注册）
+#   - Settings.Hidden = $true，任务计划程序里不弹窗
 # 用工件命令直接注册，不经过 .bat / cmd，避免任何控制台窗口。
-$shellCmd = "`"$pyw`" executor\comm_node.py $shellArgsStr"
-$wdCmd    = "`"$pyw`" scripts\watchdog.py --install-dir `"$InstallDir`""
-schtasks /create /tn "AgentBusShell" /tr $shellCmd /sc onlogon /f | Out-Null
-schtasks /create /tn "AgentBusShellWatchdog" /tr $wdCmd /sc minute /mo 1 /f | Out-Null
-# 设为隐藏运行（任务计划程序里不弹窗）
-function Set-TaskHidden([string]$n) {
-    try {
-        $t = Get-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue
-        if ($t) { $t.Settings.Hidden = $true; $t | Set-ScheduledTask | Out-Null }
-    } catch {}
-}
-Set-TaskHidden "AgentBusShell"
-Set-TaskHidden "AgentBusShellWatchdog"
+$shellAction = New-ScheduledTaskAction -Execute $pyw -Argument $shellArgsStr -WorkingDirectory $InstallDir
+$shellTrigger = New-ScheduledTaskTrigger -AtLogOn
+$shellSettings = New-ScheduledTaskSettingsSet -Hidden `
+    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 0)   # 托盘壳常驻，不限执行时长
+Register-ScheduledTask -TaskName "AgentBusShell" `
+    -Action $shellAction -Trigger $shellTrigger -Settings $shellSettings -Force | Out-Null
+
+$wdAction = New-ScheduledTaskAction -Execute $pyw `
+    -Argument "scripts\watchdog.py --install-dir `"$InstallDir`"" -WorkingDirectory $InstallDir
+$wdTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+    -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration ([TimeSpan]::MaxValue)
+$wdSettings = New-ScheduledTaskSettingsSet -Hidden `
+    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+Register-ScheduledTask -TaskName "AgentBusShellWatchdog" `
+    -Action $wdAction -Trigger $wdTrigger -Settings $wdSettings -Force | Out-Null
 Write-Host "  计划任务: AgentBusShell(onlogon, 隐藏) + AgentBusShellWatchdog(每分钟, 隐藏)"
 
 # ---------- 5. 启动托盘壳（pythonw 直启，隐藏窗口） ----------
