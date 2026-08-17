@@ -259,9 +259,13 @@ class CommNode:
             self.bus.on_message = self.handle_message
             self.bus.connect(register=True, timeout=8)
             log.info("[%s] 节点已连接总线", self.agent_id)
+            if self.role == "hub":
+                self.set_lamp("green")
         except Exception as e:
             log.error("节点总线连接失败（控制面暂不可用）: %s", e)
             self.bus = None
+            if self.role == "hub":
+                self.set_lamp("gray")
 
     # ---------------- 持久化 ----------------
 
@@ -356,15 +360,19 @@ class CommNode:
     def supervision_loop(self):
         while not self._stop.is_set():
             try:
-                if self.controlled:
-                    if self.child is None or self.child.poll() is not None:
-                        log.warning("执行器子进程不在/已退出，秒级拉起")
-                        self.spawn_child()
-                    self.set_lamp(self.compute_lamp())
+                if self.role == "worker":
+                    if self.controlled:
+                        if self.child is None or self.child.poll() is not None:
+                            log.warning("执行器子进程不在/已退出，秒级拉起")
+                            self.spawn_child()
+                        self.set_lamp(self.compute_lamp())
+                    else:
+                        # 熔断：确保执行器停
+                        self.ensure_child_stopped()
+                        self.set_lamp("gray")
                 else:
-                    # 熔断：确保执行器停
-                    self.ensure_child_stopped()
-                    self.set_lamp("gray")
+                    # hub：灯反映自身总线连接（绿=已连 bus，灰=未连）
+                    self.set_lamp("green" if self.bus else "gray")
             except Exception:
                 log.exception("监督循环异常")
             self._stop.wait(SUPERVISE_INTERVAL)
@@ -583,7 +591,7 @@ class CommNode:
         ]
         for t in threads:
             t.start()
-        if self.controlled:
+        if self.controlled and self.role == "worker":
             self.spawn_child()
         if self.headless or not self._gui:
             self.run_headless()

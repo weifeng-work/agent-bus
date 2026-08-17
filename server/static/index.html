@@ -66,6 +66,14 @@
   .chip .rm { color: #c53030; cursor: pointer; font-weight: 700; font-size: 13px;
               margin-left: 2px; opacity: .55; }
   .chip .rm:hover { opacity: 1; }
+  /* Tab 导航 */
+  .tabs { display: flex; gap: 4px; margin: 14px 0 4px; border-bottom: 1px solid var(--border); }
+  .tab { padding: 7px 18px; border: 1px solid transparent; border-bottom: none;
+         border-radius: 8px 8px 0 0; cursor: pointer; color: var(--muted); font-weight: 600; font-size: 13px;
+         background: transparent; }
+  .tab.active { background: var(--card); border-color: var(--border); color: var(--text); }
+  .tab-pane { display: none; }
+  .tab-pane.active { display: block; }
 </style>
 </head>
 <body>
@@ -87,6 +95,12 @@
 </header>
 <main>
   <div id="auth-banner" style="display:none"></div>
+  <div class="tabs">
+    <button class="tab active" data-tab="overview" onclick="switchTab('overview')">总览</button>
+    <button class="tab" data-tab="security" onclick="switchTab('security')">安全设置</button>
+  </div>
+
+  <div class="tab-pane active" id="pane-overview">
   <h2>已注册智能体</h2>
   <div id="agents"></div>
 
@@ -103,8 +117,10 @@
       <th style="width:150px">时间</th><th style="width:110px">ID</th></tr></thead>
     <tbody id="files"></tbody>
   </table>
+  </div>
 
-  <h2>安全设置（控制面配对）<span id="secHint" style="font-size:11px;color:var(--muted);font-weight:400;">仅主机本机可操作</span></h2>
+  <div class="tab-pane" id="pane-security">
+  <h2>安全设置（控制面配对）<span style="font-size:11px;color:var(--muted);font-weight:400;">仅主机本机可操作</span></h2>
   <div style="display:flex;flex-wrap:wrap;gap:16px;margin-bottom:8px;">
     <div style="flex:1;min-width:280px;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px;">
       <div style="font-weight:600;margin-bottom:6px;">一次性安装码</div>
@@ -121,6 +137,7 @@
       <div id="pairsList" style="font-size:12px;min-height:40px;color:var(--muted);"></div>
       <button onclick="resetPairs()" style="margin-top:10px;padding:6px 14px;background:#c53030;color:#fff;border:none;border-radius:8px;cursor:pointer;">重置全部配对</button>
     </div>
+  </div>
   </div>
 </main>
 <script>
@@ -336,6 +353,14 @@ function renderAgents(agents) {
 
 function busFetch(url, opts) {
   return fetch(url, opts);
+}
+
+// ---- Tab 切换（总览 / 安全设置） ----
+function switchTab(name) {
+  document.querySelectorAll(".tab").forEach(t =>
+    t.classList.toggle("active", t.dataset.tab === name));
+  document.querySelectorAll(".tab-pane").forEach(p =>
+    p.classList.toggle("active", p.id === "pane-" + name));
 }
 
 // ---- 安全设置：控制面配对（一次性安装码 / 已配对节点 / 重置） ----

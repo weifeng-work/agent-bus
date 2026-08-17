@@ -35,6 +35,16 @@ class TrayGui:
 
     def _menu(self):
         n = self.node
+        if n.role == "hub":
+            # 主控 hub 托盘：连接/受控状态人眼前可见（架构 §4.3）
+            return pystray.Menu(
+                pystray.MenuItem(f"Agent Bus [hub] {n.agent_id}", None, enabled=False),
+                pystray.MenuItem("查看控制面板", self._open_panel),
+                pystray.MenuItem("远程 Shell 用法：--shell-exec --target <node> --cmd <命令>",
+                                 None, enabled=False),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("退出", self._quit),
+            )
         return pystray.Menu(
             pystray.MenuItem(f"Agent Bus [{n.role}] {n.agent_id}", None, enabled=False),
             pystray.Menu.SEPARATOR,
@@ -56,6 +66,15 @@ class TrayGui:
     def _toggle_controlled(self, icon, item):
         self.node.set_controlled(not self.node.controlled)
         self.update_menu()
+
+    def _open_panel(self, icon, item):
+        """打开主控面板（hub 用）。"""
+        import webbrowser
+        webbrowser.open(f"{self.node.http_base}/")
+
+    def _quit(self, icon, item):
+        self.node._stop.set()
+        icon.stop()
 
     def _toggle_shell_control(self, icon, item):
         self.node.shell_control = not self.node.shell_control
