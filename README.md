@@ -96,7 +96,7 @@ powershell -ExecutionPolicy Bypass -File C:\setup_worker.ps1 -PairCode SK2ZEC5M 
 | `-PairCode` | 控制面配对码（主控机 `curl /api/control/codes` 生成；省略则 shell 控制不可用） |
 | `-EnableShellControl` | 安装即开启 shell 受控能力（默认关；开启后免二次确认，状态托盘常驻可见） |
 
-脚本依次完成：下载项目到 `C:\agent-bus` → `pip install` 依赖 → `scripts/join_team.py` 入队 → 安装通信节点（`scripts/setup_tray.ps1`：生成 start_tray.bat + 注册 `AgentBusShell` 登录自启 + `AgentBusShellWatchdog` 分钟兜底）→ 启动托盘壳 → 监督拉起执行器。
+脚本依次完成：下载项目（默认 `C:\agent-bus`，普通权限不可写时**自动改用 `%LOCALAPPDATA%\agent-bus`**）→ `pip install` 依赖 → `scripts/join_team.py` 入队 → 安装通信节点（`scripts/setup_tray.ps1`：生成 start_tray.bat + 注册 `AgentBusShell` 登录自启 + `AgentBusShellWatchdog` 分钟兜底）→ 启动托盘壳 → 监督拉起执行器。
 
 > 目标机器的 CLI 智能体（CodeBuddy/OpenCode）需已安装并登录，执行器才能接任务。
 > Linux 子设备见 [scripts/setup_linux.sh](scripts/setup_linux.sh)（角色：Skill 主动协作者 / Worker 被召唤执行）。

@@ -38,6 +38,25 @@ foreach ($c in @("python", "py")) {
 }
 if (-not $py) { throw "未找到 Python 3.10+，请先安装（可运行 setup_worker_windows.ps1 自动安装）" }
 
+# ---------- 0.5 安装目录权限自适应（与 setup_worker 一致） ----------
+function Test-DirWritable([string]$dir) {
+    try {
+        $parent = if (Test-Path $dir) { $dir } else { Split-Path $dir -Parent }
+        $probe = Join-Path $parent ("_wprobe_" + [guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $probe -Force -ErrorAction Stop | Out-Null
+        Remove-Item $probe -Force -ErrorAction SilentlyContinue
+        return $true
+    } catch { return $false }
+}
+if (-not (Test-DirWritable $InstallDir)) {
+    if ($InstallDir -eq "C:\agent-bus") {
+        $InstallDir = "$env:LOCALAPPDATA\agent-bus"
+        Write-Host "  C:\agent-bus 不可写（普通权限），自动改用: $InstallDir" -ForegroundColor Yellow
+    } else {
+        throw "安装目录不可写: $InstallDir（请改用用户可写目录，如 %LOCALAPPDATA%\agent-bus）"
+    }
+}
+
 # ---------- 1. 设备身份 ----------
 $devJson = "$env:USERPROFILE\.config\agent-bus\device.json"
 if (-not $AgentId -and (Test-Path $devJson)) {

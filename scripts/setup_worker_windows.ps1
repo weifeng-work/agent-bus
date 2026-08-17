@@ -38,6 +38,27 @@ $ErrorActionPreference = "Stop"
 $Repo = "https://github.com/weifeng-work/agent-bus"
 $LogFile = "$env:LOCALAPPDATA\agent-bus-executor.log"
 
+# ---------- 0. 安装目录权限自适应 ----------
+# Windows 默认 ACL 下普通用户不可写 C:\ 根目录 → C:\agent-bus 会安装失败。
+# 探测可写性：不可写且为默认目录时自动回退用户目录（%LOCALAPPDATA%\agent-bus）。
+function Test-DirWritable([string]$dir) {
+    try {
+        $parent = if (Test-Path $dir) { $dir } else { Split-Path $dir -Parent }
+        $probe = Join-Path $parent ("_wprobe_" + [guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $probe -Force -ErrorAction Stop | Out-Null
+        Remove-Item $probe -Force -ErrorAction SilentlyContinue
+        return $true
+    } catch { return $false }
+}
+if (-not (Test-DirWritable $InstallDir)) {
+    if ($InstallDir -eq "C:\agent-bus") {
+        $InstallDir = "$env:LOCALAPPDATA\agent-bus"
+        Write-Host "  C:\agent-bus 不可写（普通权限），自动改用: $InstallDir" -ForegroundColor Yellow
+    } else {
+        throw "安装目录不可写: $InstallDir（请改用用户可写目录，如 %LOCALAPPDATA%\agent-bus）"
+    }
+}
+
 Write-Host "== agent-bus Windows 工作节点加入 ==" -ForegroundColor Cyan
 Write-Host "  执行器: $Executor   目录: $InstallDir"
 
