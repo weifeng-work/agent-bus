@@ -618,7 +618,7 @@ class CommNode:
     def run(self):
         # 节点自身总线连接（worker 收 shell_exec / hub 发控制消息）
         # 持久化工件启动命令行（pythonw 直启，供 watchdog / 远程更新无窗口重启）
-        if self.role == "worker" and not self.no_bus:
+        if self.role == "worker" and not getattr(self.args, "no_bus", False):
             self._persist_launch_cmd()
         # 日志落盘（pythonw 无控制台，必须写文件才能排查）
         try:
