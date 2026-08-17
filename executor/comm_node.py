@@ -6,8 +6,8 @@
   [执行器]      承载   → 智能体任务逻辑（executor/<type>_executor.py）
 
 角色（--role）:
-  worker   受控电脑：执行器宿主 + （M3 起）shell/fs 底层操作
-  hub      主控电脑：逻辑总机（M2 实现）；本文件先提供自愈/监督/熔断/状态公共骨架
+  worker   受控电脑：执行器宿主 + shell/fs 底层操作（需求2/M3）
+  hub      主控电脑：控制消息发送端（--shell-exec 子命令，需求2）；逻辑总机 M2 扩展
 
 状态灯（真实 bus 状态，非进程存活，架构 §4.1）:
   绿 = 子进程在 + 状态文件新鲜(<60s) + status=connected
@@ -16,14 +16,24 @@
 
 受控开关 = 熔断（架构 §4.2）: 关闭即 kill 执行器进程树 + 写 stopped + 灯灰。
 
+控制面（需求2/M3，架构 §6）:
+  - 配对: 一次性安装码（8 位短码）→ 本地派生 K=HKDF(码) → POST /api/pair proof 校验
+    → K 存 ~/.config/agent-bus/control.json（worker 验签用）
+  - shell_exec: hub 用 K 签名（HMAC）发到 worker inbox → worker 验签 + shell_control
+    开关 → 执行（超时硬杀）→ task_result 回执 + control.log + 通知气泡
+
 用法:
-  python executor/comm_node.py --role worker --agent-id node-pc1 --name "PC1" --executor codebuddy
-  python executor/comm_node.py --headless --child-cmd "python -c \"import time;time.sleep(3)\"" --test-seconds 10
-    # headless 测试：无托盘 UI，打印状态转换，N 秒自动退出
+  worker:  python executor/comm_node.py --role worker --agent-id node-pc1 \
+              --executor-agent-id host-xxxx --executor codebuddy [--pair-code ABC2345X]
+  hub 发命令: python executor/comm_node.py --role hub --shell-exec --target node-pc1 \
+              --cmd "dir C:\\" [--timeout 30]
+  测试:  python executor/comm_node.py --headless --no-bus --child-cmd "..." --test-seconds 10
 
 GUI 依赖（pystray/pillow）懒加载：--headless 免装。
 """
 import argparse
+import base64
+import hashlib
 import json
 import logging
 import os
@@ -39,6 +49,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 
 from agent_bus import provision  # noqa: E402
+from agent_bus import crypto  # noqa: E402
 
 log = logging.getLogger("comm_node")
 
@@ -52,6 +63,8 @@ WATCHDOG_STALE_SECONDS = 150.0 # watchdog 判死阈值
 SUPERVISE_INTERVAL = 2.0       # 监督循环周期（秒级拉起）
 
 EXECUTOR_TYPES = ("codebuddy", "opencode", "workbuddy", "interactive")
+
+OUTPUT_LIMIT = 20000  # shell_exec 回执正文上限
 
 STATUS_COLORS = {"green": (46, 204, 113), "yellow": (241, 196, 15), "gray": (127, 140, 141)}
 
@@ -133,7 +146,9 @@ class CommNode:
         else:
             self.controlled = ctrl_from_file
         ccfg = load_json(self.control_cfg_file, {"shell_control": False})
-        self.shell_control = bool(ccfg.get("shell_control", False))  # M3 使用，M1 仅落盘
+        self.shell_control = bool(ccfg.get("shell_control", False))
+        if getattr(args, "enable_shell_control", False):
+            self.shell_control = True  # 安装时一次性开启（需求2 §6.3）
         self._save_control_cfg()
 
         # bus.env → 子进程环境注入
@@ -142,6 +157,18 @@ class CommNode:
         self.broker_host = self.bus_env.get("BUS_BROKER_HOST", "127.0.0.1")
         self.broker_port = int(self.bus_env.get("BUS_BROKER_PORT", "1883"))
         self.http_base = self.bus_env.get("BUS_HTTP_BASE", f"http://{self.broker_host}:8000")
+
+        # 执行器身份（与节点身份分离，架构 §3）
+        self.executor_agent_id = getattr(args, "executor_agent_id", "") or self.agent_id
+
+        # 控制面：配对密钥 K（worker 验签 / hub 签名）
+        self.control_key = b""      # bytes
+        self.control_key_b64 = ""   # base64（落盘）
+        self.worker_keys = {}       # hub 侧: worker_id -> key_b64（读 control_keys.json）
+        if self.role == "worker":
+            self._load_or_pair()
+        else:
+            self._load_hub_keys()
 
         # 运行时状态
         self.child = None            # 执行器子进程 Popen
@@ -153,11 +180,88 @@ class CommNode:
         self._last_spawn_ts = 0.0
         self._hb_thread = None
         self._gui = None             # GUI 模式专用（pystray）
+        self.bus = None              # 节点自身 MQTT 连接（M3 起）
 
         self._write_pid()
 
         if not self.headless:
             self._init_gui()
+
+    # ---------------- 控制面配对（需求2 §6.1） ----------------
+
+    def _load_or_pair(self):
+        """worker：读本地 control.json（K）；无则用 --pair-code 配对一次。"""
+        cfg_dir = Path.home() / ".config" / "agent-bus"
+        self.control_file = cfg_dir / "control.json"
+        ctrl = load_json(self.control_file, {})
+        code = getattr(self.args, "pair_code", "") or ""
+        if ctrl.get("key_b64") and ctrl.get("agent_id") == self.agent_id:
+            self.control_key_b64 = ctrl["key_b64"]
+            self.control_key = base64.b64decode(self.control_key_b64)
+            log.info("控制配对已就绪（K 已存在）")
+            return
+        if ctrl.get("key_b64"):
+            log.warning("本地 K 属于 %s，与当前节点 %s 不匹配，需重新配对",
+                        ctrl.get("agent_id"), self.agent_id)
+        if not code:
+            log.warning("未配对：无本地 K 且未提供 --pair-code。shell 控制能力不可用")
+            return
+        # 一次性配对：本地派生 K → POST /api/pair（码不落网、不落盘）
+        key = crypto.derive_pair_key(code)
+        code_hash = hashlib.sha256(code.encode("utf-8")).hexdigest()
+        claim = {"agent_id": self.agent_id, "device_name": self.name, "code_hash": code_hash}
+        proof = crypto.hmac_sign(key, claim)
+        try:
+            import urllib.request
+            req = urllib.request.Request(
+                f"{self.http_base}/api/pair",
+                data=json.dumps(claim | {"proof": proof}).encode("utf-8"),
+                headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=15) as r:
+                body = json.loads(r.read().decode("utf-8"))
+        except Exception as e:
+            log.error("配对失败: %s（安装码无效/过期或 bus_server 不可达）", e)
+            return
+        if body.get("ok"):
+            self.control_key = key
+            self.control_key_b64 = base64.b64encode(key).decode("ascii")
+            save_json(self.control_file, {"agent_id": self.agent_id,
+                                          "key_b64": self.control_key_b64,
+                                          "paired_at": time.time()})
+            log.info("控制配对成功（安装码已作废），K 已存 %s", self.control_file)
+        else:
+            log.error("配对被拒: %s", body)
+
+    def _load_hub_keys(self):
+        """hub：读 bus_server 写出的 runtime/control_keys.json（同机共享）。"""
+        keys_file = self.runtime_dir / "control_keys.json"
+        self.worker_keys = load_json(keys_file, {})
+        log.info("hub 已加载 %d 个 worker 配对密钥", len(self.worker_keys))
+
+    # ---------------- 总线连接（M3 起，节点自身收发控制消息） ----------------
+
+    def connect_bus(self):
+        """节点自身连接总线（worker 收 shell_exec；hub 发控制消息）。
+
+        失败不致命：监督/自愈照常，控制面暂不可用（log 提示）。
+        """
+        if getattr(self.args, "no_bus", False):
+            return
+        try:
+            from agent_bus import AgentBus, BusConfig
+            cfg = BusConfig.load(broker_host=self.broker_host,
+                                 broker_port=self.broker_port,
+                                 http_base=self.http_base, agent_id=self.agent_id)
+            caps = ["supervise", "route"] if self.role == "hub" else \
+                   ["supervise", "shell", "fs", "executor_activate"]
+            self.bus = AgentBus(self.agent_id, name=self.name, capabilities=caps,
+                                executor="comm_node", config=cfg)
+            self.bus.on_message = self.handle_message
+            self.bus.connect(register=True, timeout=8)
+            log.info("[%s] 节点已连接总线", self.agent_id)
+        except Exception as e:
+            log.error("节点总线连接失败（控制面暂不可用）: %s", e)
+            self.bus = None
 
     # ---------------- 持久化 ----------------
 
@@ -190,7 +294,7 @@ class CommNode:
             return self.args.child_cmd
         ex = self.executor_type
         script = self.install_dir / "executor" / f"{ex}_executor.py"
-        return [sys.executable, str(script), "--agent-id", self.agent_id,
+        return [sys.executable, str(script), "--agent-id", self.executor_agent_id,
                 "--name", self.name]
 
     def spawn_child(self):
@@ -390,18 +494,88 @@ class CommNode:
         if self._gui:
             self._gui.notify(title, message)
 
-    # ---------------- 消息分派（M2 起使用，M1 骨架） ----------------
+    # ---------------- 消息处理（控制面，需求2 §6） ----------------
 
     def handle_message(self, msg: dict):
-        """控制/对话消息分派骨架。M1 仅记录；shell_exec/executor_*/upgrade 后续里程碑实现。"""
-        op = (msg.get("payload") or {}).get("op", "run")
-        log.info("收到消息 type=%s op=%s from=%s", msg.get("type"), op, msg.get("sender_id"))
-        # M3+: 验签（control_sig）→ op 分派；M5: upgrade；M6: elevated
-        # M1 无控制类处理，执行器消息由执行器子进程直接收（本节点不做代理转发）
+        """控制/对话消息分派。M3 实现 shell_exec；executor_*/upgrade 后续里程碑。"""
+        if msg.get("type") != "task_request":
+            return
+        payload = msg.get("payload") or {}
+        op = payload.get("op", "run")
+        if op == "shell_exec":
+            self._handle_shell_exec(msg)
+        elif op in ("executor_activate", "executor_deactivate", "upgrade"):
+            self._reply(msg, status="error", error=f"op={op} 未实现（后续里程碑）")
+        else:
+            log.info("[%s] 收到任务消息 op=run from=%s（执行器直接处理，本节点不代收）",
+                     self.agent_id, msg.get("sender_id"))
+
+    def _handle_shell_exec(self, msg: dict):
+        payload = dict(msg.get("payload") or {})
+        sig = payload.pop("control_sig", "")
+        cmd = payload.get("cmd", "")
+        # 1. 验签（架构 §6.1：无 K 无法伪造合法控制消息）
+        if not self.control_key:
+            self._reply(msg, status="error", error="未配对（无 K），控制面不可用")
+            return
+        if not crypto.hmac_verify(self.control_key, payload, sig):
+            log.warning("[%s] 拒绝伪造控制消息 from=%s", self.agent_id, msg.get("sender_id"))
+            self._reply(msg, status="error", error="验签失败：签名无效或来源不可信")
+            return
+        # 2. shell_control 开关（需求2 §6.3：装后默认关，开启后免二次确认）
+        if not self.shell_control:
+            self._reply(msg, status="error", error="shell_control_disabled")
+            self._log_control(msg, payload, -1, "拒绝：shell 受控能力未开启")
+            return
+        # 3. 执行（超时硬杀）
+        cwd = payload.get("cwd") or None
+        timeout = float(payload.get("timeout_seconds", 60))
+        started = time.time()
+        try:
+            r = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True,
+                               text=True, encoding="utf-8", errors="replace",
+                               timeout=timeout)
+            out = (r.stdout or "") + ("\n" + r.stderr if r.stderr else "")
+            out = out[:OUTPUT_LIMIT]
+            self._reply(msg, status="success" if r.returncode == 0 else "error",
+                        output_text=out,
+                        error=None if r.returncode == 0 else f"exit_code={r.returncode}")
+            self._log_control(msg, payload, r.returncode, out[:200])
+        except subprocess.TimeoutExpired:
+            self._reply(msg, status="timeout", output_text="",
+                        error=f"命令超时（>{timeout}s），已终止")
+            self._log_control(msg, payload, -2, "超时")
+        except Exception as e:
+            self._reply(msg, status="error", output_text="", error=str(e))
+            self._log_control(msg, payload, -3, str(e))
+        # 4. 受控可见性（需求2 §6.4：通知气泡，强制）
+        self.notify("受控操作", f"主控 {msg.get('sender_id')} 正在执行: {cmd[:120]}")
+        log.info("[%s] shell_exec 完成 cmd=%s", self.agent_id, cmd[:80])
+
+    def _reply(self, msg, status, output_text="", error=None):
+        if self.bus:
+            self.bus.reply_task(msg, output_text=output_text, status=status, error=error)
+        else:
+            log.warning("[%s] 无总线连接，无法回执 status=%s", self.agent_id, status)
+
+    def _log_control(self, msg, payload, exit_code, summary):
+        """本地 control.log（需求2 §6.4 三处留存之一）。"""
+        try:
+            line = json.dumps({
+                "ts": time.time(), "sender": msg.get("sender_id"),
+                "op": payload.get("op"), "cmd": payload.get("cmd"),
+                "exit": exit_code, "summary": summary,
+            }, ensure_ascii=False)
+            with open(self.control_log, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:
+            pass
 
     # ---------------- 主流程 ----------------
 
     def run(self):
+        # 节点自身总线连接（worker 收 shell_exec / hub 发控制消息）
+        self.connect_bus()
         # 监督 + 心跳线程（GUI/headless 共用）
         threads = [
             threading.Thread(target=self.supervision_loop, daemon=True),
@@ -434,7 +608,48 @@ class CommNode:
     def shutdown(self):
         self._stop.set()
         self.ensure_child_stopped()
+        if self.bus:
+            try:
+                self.bus.disconnect()
+            except Exception:
+                pass
         log.info("通信节点已退出")
+
+
+# ---------------------------------------------------------------------------
+# hub 一次性发命令（需求2：主控 CLI 形态）
+# ---------------------------------------------------------------------------
+
+
+def run_hub_shell_exec(node: CommNode, args):
+    """hub 发 shell_exec：读配对 K → 签名 → 发 MQTT → 等回执 → 打印。"""
+    key_b64 = node.worker_keys.get(args.target)
+    if not key_b64:
+        print(f"error: worker {args.target} 未配对（runtime/control_keys.json 无记录）")
+        sys.exit(1)
+    key = base64.b64decode(key_b64)
+    payload = {"op": "shell_exec", "cmd": args.cmd,
+               "timeout_seconds": args.timeout}
+    sig = crypto.hmac_sign(key, payload)
+    signed_payload = dict(payload, control_sig=sig)
+
+    from agent_bus.schema import make_task_request
+    req = make_task_request(node.agent_id, args.target, instruction="",
+                            timeout_seconds=args.timeout)
+    req["payload"] = signed_payload
+
+    node.connect_bus()
+    if not node.bus:
+        print("error: hub 无法连接总线")
+        sys.exit(1)
+    result = node.bus.send_msg(args.target, req, wait=True,
+                               wait_timeout=args.timeout + 30)
+    node.bus.disconnect()
+    if result is None:
+        print("error: 超时未收到回执")
+        sys.exit(1)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    sys.exit(0 if result.get("status") == "success" else 1)
 
 
 # ---------------------------------------------------------------------------
@@ -443,23 +658,44 @@ class CommNode:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Agent Bus 通信节点（三层自愈 + 监督 + 熔断）")
+    ap = argparse.ArgumentParser(description="Agent Bus 通信节点（自愈 + 监督 + 熔断 + 控制面）")
     ap.add_argument("--role", choices=("worker", "hub"), default="worker",
-                    help="worker=受控（默认）/ hub=主控总机（M2）")
-    ap.add_argument("--agent-id", required=True)
+                    help="worker=受控（默认）/ hub=主控")
+    ap.add_argument("--agent-id", required=True,
+                    help="节点自身身份（worker 收控制消息、hub 发送用）")
     ap.add_argument("--name", default="")
     ap.add_argument("--executor", choices=EXECUTOR_TYPES, default="codebuddy",
-                    help="监督并拉起的执行器类型")
+                    help="worker 监督并拉起的执行器类型")
+    ap.add_argument("--executor-agent-id", default="",
+                    help="执行器子进程身份（默认读 device.json，其次 = --agent-id）")
     ap.add_argument("--install-dir", default=str(ROOT_DIR))
     ap.add_argument("--headless", action="store_true", help="无托盘 UI（测试/服务模式）")
+    ap.add_argument("--no-bus", action="store_true",
+                    help="不连 MQTT（纯监督测试用，控制面不可用）")
     ap.add_argument("--child-cmd", default="", help="测试用：自定义子进程命令（覆盖执行器）")
     ap.add_argument("--controlled", choices=("on", "off"), default="",
                     help="显式覆盖受控开关（默认读 controlled.json；off=熔断）")
     ap.add_argument("--test-seconds", type=int, default=0,
                     help="headless 测试时限（秒），到点自动退出")
+    # 控制面（需求2）
+    ap.add_argument("--pair-code", default="",
+                    help="worker 一次性安装码（配对后即作废，不落盘）")
+    ap.add_argument("--enable-shell-control", action="store_true",
+                    help="安装时开启 shell 受控能力（默认关）")
+    ap.add_argument("--shell-exec", action="store_true",
+                    help="hub 子命令：发送 shell_exec 并等待回执")
+    ap.add_argument("--target", default="", help="--shell-exec 目标 worker 节点 id")
+    ap.add_argument("--cmd", default="", help="--shell-exec 要执行的命令")
+    ap.add_argument("--timeout", type=int, default=60, help="shell_exec 超时（秒）")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s [%(levelname)s] %(message)s")
+    if args.role == "hub" and args.shell_exec:
+        if not args.target or not args.cmd:
+            ap.error("--shell-exec 需要 --target 与 --cmd")
+        args.headless = True  # 一次性 CLI 模式，无托盘
+        run_hub_shell_exec(CommNode(args), args)
+        return
     node = CommNode(args)
     try:
         node.run()

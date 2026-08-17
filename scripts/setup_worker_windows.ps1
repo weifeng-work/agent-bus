@@ -28,7 +28,9 @@ param(
     [string]$HostIP = "",
     [string]$Executor = "codebuddy",
     [string]$Name = "",
-    [string]$InstallDir = "C:\agent-bus"
+    [string]$InstallDir = "C:\agent-bus",
+    [string]$PairCode = "",
+    [switch]$EnableShellControl
 )
 
 $ErrorActionPreference = "Stop"
@@ -115,7 +117,8 @@ if (-not $Name)    { $Name = ($Executor.Substring(0,1).ToUpper() + $Executor.Sub
 
 # 委托 setup_tray.ps1：生成 start_tray.bat + 注册计划任务（onlogon + 分钟 watchdog）+ 启动
 & "$InstallDir\scripts\setup_tray.ps1" -InstallDir $InstallDir -Executor $Executor `
-    -AgentId $agentId -Name $Name
+    -AgentId $agentId -Name $Name -PairCode $PairCode `
+    -EnableShellControl:$EnableShellControl
 if ($LASTEXITCODE -ne 0) { throw "通信节点安装失败（exit=$LASTEXITCODE）" }
 Start-Sleep 5
 

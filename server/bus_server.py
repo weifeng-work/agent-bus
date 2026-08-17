@@ -9,10 +9,13 @@
                               [--db data/bus.db] [--files-dir data/files]
 """
 import argparse
+import base64
+import hashlib
 import json
 import logging
 import os
 import platform as _platform
+import secrets
 import sqlite3
 import sys
 import threading
@@ -30,6 +33,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from agent_bus import provision
+from agent_bus import crypto
 from agent_bus.discovery import BeaconBroadcaster, PROTO, PROTO_VER
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -81,6 +85,10 @@ class Store:
                     id INTEGER PRIMARY KEY CHECK (id=1),
                     team_id TEXT, team_name TEXT,
                     created_at REAL, updated_at REAL
+                );
+                CREATE TABLE IF NOT EXISTS control_pairs(
+                    agent_id TEXT PRIMARY KEY,
+                    key_b64 TEXT, code_hash TEXT, paired_at REAL
                 );
                 """
             )
@@ -214,6 +222,22 @@ class Store:
     def delete_agent(self, agent_id: str):
         self.execute("DELETE FROM agents WHERE agent_id=?", (agent_id,))
 
+    # ---- 控制面配对（M3） ----
+
+    def save_pair(self, agent_id: str, key_b64: str, code_hash: str):
+        self.execute(
+            "INSERT OR REPLACE INTO control_pairs(agent_id,key_b64,code_hash,paired_at)"
+            " VALUES(?,?,?,?)",
+            (agent_id, key_b64, code_hash, time.time()),
+        )
+
+    def list_pairs(self):
+        rows = self.execute("SELECT agent_id,key_b64 FROM control_pairs", fetch=True)
+        return [dict(r) for r in rows]
+
+    def clear_pairs(self):
+        self.execute("DELETE FROM control_pairs")
+
 
 # ---------------------------------------------------------------------------
 # MQTT 桥
@@ -265,6 +289,29 @@ class MqttBridge:
         elif topic.startswith("bus/offline/"):
             self.store.mark_offline(data.get("agent_id", ""))
             log.info("离线(遗嘱): %s", data.get("agent_id"))
+
+
+# ---------------------------------------------------------------------------
+# 控制面配对（M3，架构 §6.1）：一次性安装码 + 本地派生密钥
+# ---------------------------------------------------------------------------
+
+PAIR_CODE_CHARS = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"  # 去易混淆字符
+PAIR_CODE_TTL = 900.0                                # 15 分钟
+_pending_codes = {}  # code_hash -> {"key_b64", "expires_at"}（进程内，重启即失效）
+
+
+def _gen_pair_code() -> str:
+    return "".join(secrets.choice(PAIR_CODE_CHARS) for _ in range(8))
+
+
+def _write_control_keys(store: Store):
+    """把已配对 worker 的 K 写出 runtime/control_keys.json（hub 同机读取，架构 §6.1）。"""
+    pairs = store.list_pairs()
+    data = {p["agent_id"]: p["key_b64"] for p in pairs}
+    runtime = ROOT_DIR / "data" / "runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    (runtime / "control_keys.json").write_text(
+        json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +395,64 @@ def create_app(store: Store, files_dir: Path, bridge: MqttBridge,
         store.delete_agent(agent_id)
         log.info("节点已移除: %s by %s", agent_id, ident.get("agent_id"))
         return {"ok": True, "agent_id": agent_id}
+
+    # ---- 控制面配对（M3）：一次性安装码 + proof 校验 ----
+
+    def local_only(request: Request):
+        if not request.client or request.client.host not in ("127.0.0.1", "::1"):
+            raise HTTPException(403, "仅主机本机可执行此操作")
+
+    class PairBody(BaseModel):
+        agent_id: str = ""
+        device_name: str = ""
+        code_hash: str = ""   # worker 本地算的码哈希（定位码，不含 K）
+        proof: str = ""       # HMAC(K, "pairing")，K 由码本地派生
+
+    @app.post("/api/control/codes")
+    def gen_pair_code(request: Request):
+        """生成一次性安装码（仅本机 127.0.0.1）：8 位、15 分钟有效、一次性。"""
+        local_only(request)
+        code = _gen_pair_code()
+        key = crypto.derive_pair_key(code)
+        code_hash = hashlib.sha256(code.encode("utf-8")).hexdigest()
+        _pending_codes[code_hash] = {
+            "key_b64": base64.b64encode(key).decode("ascii"),
+            "expires_at": time.time() + PAIR_CODE_TTL,
+        }
+        log.info("安装码已生成（15 分钟有效，一次性）")
+        return {"ok": True, "code": code,
+                "expires_at": time.time() + PAIR_CODE_TTL}
+
+    @app.post("/api/pair")
+    def pair(body: PairBody):
+        """worker 配对：按 code_hash 定位码 → proof 校验 → 登记 K（hub 同机读取）。"""
+        agent_id = (body.agent_id or "").strip()
+        if not provision.valid_agent_id(agent_id):
+            raise HTTPException(400, "agent_id 非法（限 [A-Za-z0-9_-]，1-64 位）")
+        pend = _pending_codes.get((body.code_hash or "").strip())
+        if not pend or pend["expires_at"] < time.time():
+            raise HTTPException(401, "安装码无效或已过期")
+        key = base64.b64decode(pend["key_b64"])
+        claim = {"agent_id": agent_id, "device_name": body.device_name,
+                 "code_hash": body.code_hash}
+        if not crypto.hmac_verify(key, claim, body.proof):
+            raise HTTPException(401, "配对校验失败")
+        del _pending_codes[body.code_hash]  # 一次性：配对成功即作废
+        store.save_pair(agent_id, pend["key_b64"], body.code_hash)
+        _write_control_keys(store)
+        team = store.get_team()
+        log.info("控制配对成功: %s (%s)", agent_id, body.device_name)
+        return {"ok": True, "team_name": team["team_name"] if team else ""}
+
+    @app.post("/api/control/reset")
+    def control_reset(request: Request):
+        """重置全部配对（仅本机）：所有 worker 控制失效，需重新配对。"""
+        local_only(request)
+        _pending_codes.clear()
+        store.clear_pairs()
+        _write_control_keys(store)
+        log.info("控制配对已全部重置")
+        return {"ok": True}
 
     @app.get("/api/agents")
     def agents(ident: dict = Depends(require_token)):

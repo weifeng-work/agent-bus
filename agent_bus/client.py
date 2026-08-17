@@ -221,6 +221,32 @@ class AgentBus:
             return None
         return slot["result"]
 
+    def send_msg(self, target_id: str, msg: dict, wait: bool = True,
+                 wait_timeout: float = None):
+        """发送自定义消息到目标 inbox（控制面/特殊 op 用）。
+
+        msg 须为合法报文（含 protocol_version/type/sender_id/correlation_id）。
+        wait=True 时阻塞等待匹配 correlation_id 的 task_result。
+        """
+        if not wait:
+            self._client.publish(inbox_topic(target_id), json.dumps(msg), qos=1)
+            return msg
+        corr = msg.get("correlation_id")
+        if not corr:
+            raise ValueError("wait=True 的消息必须带 correlation_id")
+        slot = {"event": threading.Event(), "result": None}
+        with self._pending_lock:
+            self._pending[corr] = slot
+        self._client.publish(inbox_topic(target_id), json.dumps(msg), qos=1)
+        log.info("[%s] 消息已发送 %s -> %s", self.agent_id, msg.get("task_id", "")[:8], target_id)
+        ok = slot["event"].wait(wait_timeout or 120)
+        with self._pending_lock:
+            self._pending.pop(corr, None)
+        if not ok:
+            log.warning("[%s] 等待回执超时 task=%s", self.agent_id, msg.get("task_id", ""))
+            return None
+        return slot["result"]
+
     def reply_task(self, request: dict, output_text: str, status: str = "success",
                    error=None, artifacts=None, session_id: str = None) -> bool:
         """把执行结果回传给任务发起方。"""

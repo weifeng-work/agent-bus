@@ -52,13 +52,17 @@ Write-Host "  executor : $Executor"
 
 # ---------- 2. start_tray.bat ----------
 $logFile = "$InstallDir\data\tray_shell.log"
+# 节点身份与执行器身份分离（架构 §3）：node-<agent> 收控制消息，执行器用原 agent_id
+$nodeId = "node-$AgentId"
+$pairArg  = if ($PairCode) { "--pair-code $PairCode" } else { "" }
+$shellArg = if ($EnableShellControl) { "--enable-shell-control" } else { "" }
 $bat = @"
 @echo off
 cd /d $InstallDir
-start "" /min cmd /c "$py executor\comm_node.py --role worker --agent-id $AgentId --name `"$Name`" --executor $Executor --install-dir $InstallDir > `"$logFile`" 2>&1"
+start "" /min cmd /c "$py executor\comm_node.py --role worker --agent-id $nodeId --executor-agent-id $AgentId --name `"$Name`" --executor $Executor --install-dir $InstallDir $pairArg $shellArg > `"$logFile`" 2>&1"
 "@
 Set-Content -Path "$InstallDir\start_tray.bat" -Value $bat -Encoding ASCII
-Write-Host "  已生成: $InstallDir\start_tray.bat"
+Write-Host "  已生成: $InstallDir\start_tray.bat（节点身份 $nodeId）"
 
 # ---------- 3. 删除旧版直启任务（升级兼容） ----------
 schtasks /delete /tn "AgentBus$Executor" /f 2>$null | Out-Null

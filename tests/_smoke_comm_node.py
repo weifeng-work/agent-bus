@@ -18,7 +18,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PY = sys.executable
-CMD = [PY, str(ROOT / "executor" / "comm_node.py"), "--headless", "--install-dir", "PLACEHOLDER"]
+CMD = [PY, str(ROOT / "executor" / "comm_node.py"), "--headless", "--no-bus",
+       "--install-dir", "PLACEHOLDER"]
 
 PASS, FAIL = 0, 0
 
