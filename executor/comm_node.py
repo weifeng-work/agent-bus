@@ -111,6 +111,18 @@ def kill_process_tree(pid: int):
         log.warning("kill 进程树失败 pid=%s: %s", pid, e)
 
 
+def _decode_bytes(b: bytes) -> str:
+    """shell 输出解码：UTF-8 优先，回退 GBK（Windows cmd 默认代码页 936）再 latin-1。"""
+    if b is None:
+        return ""
+    for enc in ("utf-8", "gbk", "latin-1"):
+        try:
+            return b.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return b.decode("utf-8", errors="replace")
+
+
 # ---------------------------------------------------------------------------
 # 通信节点
 # ---------------------------------------------------------------------------
@@ -558,9 +570,8 @@ class CommNode:
         started = time.time()
         try:
             r = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True,
-                               text=True, encoding="utf-8", errors="replace",
                                timeout=timeout)
-            out = (r.stdout or "") + ("\n" + r.stderr if r.stderr else "")
+            out = _decode_bytes(r.stdout) + ("\n" + _decode_bytes(r.stderr) if r.stderr else "")
             out = out[:OUTPUT_LIMIT]
             self._reply(msg, status="success" if r.returncode == 0 else "error",
                         output_text=out,
