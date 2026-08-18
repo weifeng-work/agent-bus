@@ -91,13 +91,16 @@ PROFILES = {
     # - 回复以 "●" 开头成块出现在输入行上方
     "codebuddy": AgentProfile(
         key="codebuddy",
-        # `--permission-mode acceptEdits`：TUI 进目录/编辑文件免二次授权确认，
-        # 避免交互式执行器在授权请求处卡住；acceptEdits 仍保留模型有权限范围。
-        launch_command="codebuddy --permission-mode acceptEdits",
+        # `--permission-mode bypassPermissions`：彻底跳过所有权限确认（含 Bash 执行、
+        # 文件读写等），否则交互式执行器会在 "Do you want to proceed?" 授权框处卡住。
+        # 注意: 仅适用于受控可信局域网内的自动化智能体。
+        launch_command="codebuddy --permission-mode bypassPermissions",
         ready_pattern=r"^\s*>",           # 输入行（ghost 占位提示也匹配）
         ready_hint="⏵⏵",                 # 状态栏出现才算主界面就绪
         startup_dialogs=[
             (r"Do you trust the files in this folder\?", "Enter"),
+            # 万一仍有权限确认框(如 Bash 授权): 下移到 "Yes, and don't ask" 再确认
+            (r"Do you want to proceed\?", "Down Down Enter"),
         ],
         answer_bullet=r"^\s*●",
         input_line=r"^\s*>\s",
