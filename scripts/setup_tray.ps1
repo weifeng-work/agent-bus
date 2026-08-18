@@ -43,26 +43,34 @@ if (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
 }
 
 # ---------- 0. Python 检测 ----------
-$py = $null
+# NSSM 服务默认以 LocalSystem 账户运行，其系统 PATH 通常不含用户级 Python 目录，
+# 因此必须解析出 Python 解释器的绝对路径（不能只传相对命令名 "python"/"py -3"），
+# 否则服务进程启动即退出、日志为空（SERVICE_STOPPED）。
+$py = $null       # 可执行方案描述（"python" / "py -3"），仅用于日志
+$pyAbs = $null    # 解释器绝对路径（NSSM Application 使用，服务上下文可解析）
 foreach ($c in @("python", "py")) {
     $cmd = Get-Command $c -ErrorAction SilentlyContinue
-    if ($cmd) {
-        $test = if ($c -eq "py") { "py -3" } else { "python" }
-        try { & cmd /c "$test --version" 2>$null | Out-Null; if ($LASTEXITCODE -eq 0) { $py = $test; break } } catch {}
+    if (-not $cmd) { continue }
+    $exe = $cmd.Source      # 绝对路径（python.exe / py.exe）
+    # 探测真实解释器绝对路径：py launcher 需带 -3 参数；通过 sys.executable 拿到实际 python.exe
+    try {
+        if ($c -eq "py") { $probe = (& $exe -3 -c "import sys;print(sys.executable)" 2>$null | Select-Object -Last 1) }
+        else             { $probe = (& $exe -c "import sys;print(sys.executable)" 2>$null | Select-Object -Last 1) }
+    } catch { $probe = $null }
+    if ($probe -and (Test-Path -LiteralPath $probe)) {
+        $pyAbs = (Get-Item -LiteralPath $probe).FullName
+        $py = if ($c -eq "py") { "py -3" } else { "python" }
+        break
     }
+    # 探测失败（如内部 python 禁了 sys）退回 Get-Command 的绝对 Source
+    if ($exe -and (Test-Path -LiteralPath $exe)) { $pyAbs = (Get-Item -LiteralPath $exe).FullName; $py = if ($c -eq "py") { "py -3" } else { "python" }; break }
 }
-if (-not $py) { throw "未找到 Python 3.10+，请先安装" }
+if (-not $pyAbs) { throw "未找到可用的 Python 3.10+（请安装并确保 python / py 在 PATH）" }
+$pywAbs = $pyAbs -replace "python\.exe$", "pythonw.exe"
+if (-not (Test-Path -LiteralPath $pywAbs)) { $pywAbs = "$pyAbs" }
 
-# ---------- 0.2 解析 pythonw ----------
-function Resolve-PythonW {
-    $c = Get-Command pythonw -ErrorAction SilentlyContinue
-    if ($c) { return $c.Source }
-    $c = Get-Command pyw -ErrorAction SilentlyContinue
-    if ($c) { return $c.Source }
-    if ($py -eq "py") { return "pyw" }
-    return "pythonw"
-}
-$pyw = Resolve-PythonW
+Write-Host "  python     : $pyAbs" -ForegroundColor DarkGray
+Write-Host "  pythonw    : $pywAbs" -ForegroundColor DarkGray
 
 # ---------- 0.5 安装目录权限检查（D6：默认 %LOCALAPPDATA%\agent-bus） ----------
 # %LOCALAPPDATA% 是用户目录，用户与 SYSTEM 服务均可读写，无需 ACL 调整
@@ -172,8 +180,8 @@ if (Get-Service AgentBusCore -ErrorAction SilentlyContinue) {
     Write-Host "  无旧服务 AgentBusCore，跳过清理" -ForegroundColor DarkGray
 }
 
-# 安装服务
-& $nssm install AgentBusCore $py $serviceArgsStr 2>&1 | Out-Null
+# 安装服务（Application 用解释器绝对路径，避免 LocalSystem 下相对 python 不可解析）
+& $nssm install AgentBusCore $pyAbs $serviceArgsStr 2>&1 | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "NSSM 安装服务失败（需要管理员权限）" }
 
 # 配置 NSSM 参数
@@ -192,7 +200,7 @@ if (-not (Test-Path $startMenuDir)) { New-Item -ItemType Directory -Path $startM
 $shortcutPath = "$startMenuDir\Agent Bus Tray.lnk"
 $wshell = New-Object -ComObject WScript.Shell
 $shortcut = $wshell.CreateShortcut($shortcutPath)
-$shortcut.TargetPath = $pyw
+$shortcut.TargetPath = $pywAbs
 $shortcut.Arguments = $trayArgsStr
 $shortcut.WorkingDirectory = $InstallDir
 $shortcut.Description = "Agent Bus 托盘 UI - 受控节点状态面板"
@@ -200,7 +208,7 @@ $shortcut.Save()
 Write-Host "  开始菜单快捷方式: $shortcutPath"
 
 # 也注册计划任务（onlogon 自动启动托盘，作为备用拉起方式）
-$trayAction = New-ScheduledTaskAction -Execute $pyw -Argument $trayArgsStr -WorkingDirectory $InstallDir
+$trayAction = New-ScheduledTaskAction -Execute $pywAbs -Argument $trayArgsStr -WorkingDirectory $InstallDir
 $trayTrigger = New-ScheduledTaskTrigger -AtLogOn
 $traySettings = New-ScheduledTaskSettingsSet -Hidden `
     -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
@@ -229,7 +237,7 @@ Get-CimInstance Win32_Process |
   Where-Object { $_.CommandLine -match 'tray_app|comm_node|_executor\.py' } |
   ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 Start-Sleep 1
-Start-Process -FilePath $pyw -ArgumentList $trayArgs -WindowStyle Hidden -WorkingDirectory $InstallDir
+Start-Process -FilePath $pywAbs -ArgumentList $trayArgs -WindowStyle Hidden -WorkingDirectory $InstallDir
 
 Write-Host ""
 Write-Host "== 完成 ==" -ForegroundColor Green
