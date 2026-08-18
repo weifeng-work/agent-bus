@@ -116,6 +116,8 @@ class InteractiveExecutor:
         log.info("拉起交互会话 %s (cmd=%s)", self.session_name, self.profile.launch_command)
         if not self.mux.start_session(self.session_name):
             raise RuntimeError(f"无法创建 mux 会话 {self.session_name}")
+        if not self.args.no_visible and self.mux.attach_visible(self.session_name):
+            log.info("已打开可视附着窗口: %s", self.session_name)
         self.ctrl = ControlClient(self.mux, self.session_name,
                                   cols=self.mux.cols, rows=self.mux.rows)
         self.ctrl.bind_pane()
@@ -433,6 +435,8 @@ def main():
     parser.add_argument("--name", default="")
     parser.add_argument("--cli", default="codebuddy", choices=["codebuddy", "opencode"])
     parser.add_argument("--mock", action="store_true", help="模拟执行，不拉 TUI（联调用）")
+    parser.add_argument("--no-visible", action="store_true",
+                        help="不打开可视附着窗口（默认打开；无人值守/headless 节点使用）")
     parser.add_argument("--workdir", default=str(ROOT_DIR / "data" / "interactive_work"))
     parser.add_argument("--timeout", type=int, default=1800, help="单任务硬超时（秒）")
     parser.add_argument("--progress-interval", type=float, default=3.0, help="进度直播间隔（秒）")

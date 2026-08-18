@@ -26,6 +26,8 @@ IS_WIN = platform.system() == "Windows"
 
 # Windows: 子进程不闪控制台窗口
 _CREATIONFLAGS = 0x08000000 if IS_WIN else 0  # CREATE_NO_WINDOW
+# Windows: 可视附着窗口需要独立的新控制台（人类观察 TUI 对话流用）
+_VISIBLE_CONSOLE = 0x00000010 if IS_WIN else 0  # CREATE_NEW_CONSOLE
 
 
 def find_mux_binary() -> str:
@@ -102,6 +104,32 @@ class MuxTransport:
 
     def kill_session(self, name: str) -> bool:
         return self._run("kill-session", "-t", name, timeout=15).returncode == 0
+
+    def attach_visible(self, name: str) -> bool:
+        """为会话打开人类可见的交互附着窗口（直接观察 TUI 对话流）。
+
+        - 仅 Windows（Linux 无人值守节点直接返回 False，调用方不视为错误）
+        - cmd /c 载体: kill-session 后附着客户端退出，窗口自动关闭，无需 teardown 配合
+        - mode con 预置与创建时一致的几何（评审共识: 几何 pin 死防 viewer resize 错位）
+        - 窗口标题 = 会话名（sanitize 掉 cmd 元字符）
+        """
+        if not IS_WIN:
+            return False
+        safe_title = "".join(c for c in name if c not in '&|<>^"')
+        cmd = (f"title {safe_title} & "
+               f"mode con cols={self.cols} lines={self.rows} & "
+               f"{self.binary} attach-session -t {name}")
+        try:
+            if " " in self.binary:
+                # 路径含空格: /S /c 让 cmd 把整条带引号命令串原样执行
+                subprocess.Popen(["cmd.exe", "/S", "/c", f'"{cmd}"'],
+                                 env=self._env, creationflags=_VISIBLE_CONSOLE)
+            else:
+                subprocess.Popen(["cmd.exe", "/c", cmd],
+                                 env=self._env, creationflags=_VISIBLE_CONSOLE)
+            return True
+        except OSError:
+            return False
 
     def pane_pid(self, target: str):
         """取 pane 主进程 PID（进程树看护用）。"""
