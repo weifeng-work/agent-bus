@@ -139,11 +139,14 @@ class MuxTransport:
         if not term:
             return False
         # 终端 -e 载体跑 tmux attach；会话被 kill 后客户端退出 → 窗口自动关闭
-        attach_cmd = [self.binary, "attach-session", "-t", name]
+        # 注意: -e 后必须把完整命令作为"命令+参数"传入，否则 xfce4-terminal 会把
+        # tmux 的子参数（attach-session 等）误当作自己的选项。用 bash -c 包裹最稳。
+        attach_cmd = f"{self.binary} attach-session -t {name}"
         env = dict(self._env)
         env["DISPLAY"] = display
         try:
-            subprocess.Popen([term, "-e"] + attach_cmd,
+            # 优先 bash -c 包裹（终端模拟器对 -e 的解析不一，-c 保证命令边界清晰）
+            subprocess.Popen([term, "-e", "bash", "-c", attach_cmd],
                              env=env, start_new_session=True)
             return True
         except OSError:
