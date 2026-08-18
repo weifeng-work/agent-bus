@@ -193,6 +193,17 @@ if ($LASTEXITCODE -ne 0) { throw "NSSM 安装服务失败（需要管理员权�
 & $nssm set AgentBusCore AppStderr "$InstallDir\data\service.err.log" 2>&1 | Out-Null
 Write-Host "  服务 AgentBusCore 已注册（自动启动，崩溃 5s 后重启）"
 
+# bus.env：NSSM 服务以 LocalSystem 身份运行，Path.home() 指向 systemprofile 而非用户目录，
+# 读不到 ~/.config/agent-bus/bus.env → broker 回落 127.0.0.1 → 10061 拒绝连接。
+# 修复：把 bus.env 拷贝到安装目录下，服务通过 install_dir / "bus.env" 读取。
+$userBusEnv = Join-Path $env:USERPROFILE ".config\agent-bus\bus.env"
+if (Test-Path $userBusEnv) {
+    Copy-Item -Path $userBusEnv -Destination "$InstallDir\bus.env" -Force
+    Write-Host "  bus.env 已部署到安装目录（LocalSystem 服务可读）" -ForegroundColor DarkGray
+} else {
+    Write-Host "  警告: 未找到 $userBusEnv，服务可能无法连接总线" -ForegroundColor Yellow
+}
+
 # ---------- 5. 创建开始菜单快捷方式（代替计划任务拉起托盘） ----------
 Write-Host "  [5/6] 创建开始菜单快捷方式..." -ForegroundColor Cyan
 $startMenuDir = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Agent Bus"
