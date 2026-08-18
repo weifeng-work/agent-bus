@@ -1,0 +1,73 @@
+name: PowerShell 脚本校验
+
+# 目的：防止 .ps1 脚本埋雷导致 Windows PowerShell 5.1 解析失败
+# 覆盖三个已知问题：
+#   1. 末尾 Write-Host 字符串未闭合（缺结尾引号）
+#   2. 含中文的 .ps1 无 UTF-8 BOM → PS5.1 按 GBK 读成乱码 → 解析崩溃
+#   3. 语法错误（Parser::ParseFile 权威校验）
+
+on:
+  push:
+    paths:
+      - "scripts/**"
+      - ".github/workflows/ps1-check.yml"
+  pull_request:
+    paths:
+      - "scripts/**"
+
+jobs:
+  ps1-parse-check:
+    name: PS 5.1 解析校验
+    runs-on: windows-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: PS 5.1 语法校验 + BOM 检查
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $failed = $false
+
+          $files = Get-ChildItem -Path scripts -Filter *.ps1 -Recurse -ErrorAction SilentlyContinue
+          if (-not $files) {
+            Write-Host "无 .ps1 文件"
+            exit 0
+          }
+
+          Write-Host "===== 1) PS 5.1 语法校验 (Parser::ParseFile) ====="
+          foreach ($f in $files) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              $failed = $true
+              Write-Host "[FAIL] $($f.Name)" -ForegroundColor Red
+              foreach ($e in $errors) {
+                Write-Host "  L$($e.Extent.StartLineNumber):$($e.Extent.StartColumnNumber) $($e.Message)"
+              }
+            } else {
+              Write-Host "[OK]   $($f.Name)"
+            }
+          }
+
+          Write-Host ""
+          Write-Host "===== 2) 含中文的 .ps1 必须带 UTF-8 BOM ====="
+          foreach ($f in $files) {
+            $bytes = [System.IO.File]::ReadAllBytes($f.FullName)
+            $hasBom = ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)
+            $text = [System.IO.File]::ReadAllText($f.FullName, [System.Text.Encoding]::UTF8)
+            $hasCJK = $text -match '[一-鿿]'
+            if ($hasCJK -and -not $hasBom) {
+              $failed = $true
+              Write-Host "[FAIL] $($f.Name) 含中文但无 UTF-8 BOM（PS5.1 会乱码）" -ForegroundColor Red
+            } else {
+              Write-Host "[OK]   $($f.Name) (BOM=$hasBom, CJK=$hasCJK)"
+            }
+          }
+
+          if ($failed) {
+            Write-Host "`n===== 校验失败 =====" -ForegroundColor Red
+            exit 1
+          }
+          Write-Host "`n===== 全部通过 =====" -ForegroundColor Green
