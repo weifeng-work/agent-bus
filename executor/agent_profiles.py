@@ -91,7 +91,9 @@ PROFILES = {
     # - 回复以 "●" 开头成块出现在输入行上方
     "codebuddy": AgentProfile(
         key="codebuddy",
-        launch_command="codebuddy",
+        # `--permission-mode acceptEdits`：TUI 进目录/编辑文件免二次授权确认，
+        # 避免交互式执行器在授权请求处卡住；acceptEdits 仍保留模型有权限范围。
+        launch_command="codebuddy --permission-mode acceptEdits",
         ready_pattern=r"^\s*>",           # 输入行（ghost 占位提示也匹配）
         ready_hint="⏵⏵",                 # 状态栏出现才算主界面就绪
         startup_dialogs=[
@@ -111,10 +113,14 @@ PROFILES = {
     # - 右侧 "Getting started" 弹窗混在答案区，靠 status_noise 剔除
     "opencode": AgentProfile(
         key="opencode",
-        launch_command="opencode",
+        # `--auto`：自动批准未被显式拒绝的权限（与 codebuddy acceptEdits 等价），
+        # 避免交互式执行器卡在权限确认请求。
+        launch_command="opencode --auto",
         ready_pattern=r"Ask anything",
         ready_hint="tab agents",
-        startup_dialogs=[],
+        startup_dialogs=[
+            (r"Connect provider", "Enter"),  # 首次需配置 provider 的连接提示
+        ],
         answer_bullet=r"^\s{0,4}┃[ \t]+\S",  # 用户消息回显行（新答案块的起点锚；[ \t] 禁跨行匹配）
         bullet_in_answer=False,             # 回显是用户的话，不属于答案内容
         input_line=r"^\s{0,4}┃",            # 任何 ┃ 行（输入框块锚定 + clean 截停用）

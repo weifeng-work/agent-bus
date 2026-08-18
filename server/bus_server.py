@@ -144,7 +144,9 @@ class Store:
     # ---- messages ----
 
     def log_message(self, topic: str, msg: dict):
-        if topic.startswith("bus/heartbeat/"):
+        # 心跳与遗嘱不入库：它们只反映节点在线/离线状态，非任务消息，
+        # 入库只会刷屏并淹没真实消息时间线
+        if topic.startswith("bus/heartbeat/") or topic.startswith("bus/offline/"):
             return
         target_id = msg.get("target_id", "")
         if msg.get("type") == "task_result" and not target_id and msg.get("correlation_id"):
@@ -340,7 +342,12 @@ def create_app(store: Store, files_dir: Path, bridge: MqttBridge,
 
     @app.get("/api/agents")
     def agents(ident: dict = Depends(require_token)):
-        return store.list_agents()
+        # 标记本机（运行 bus_server 的主控机）上的节点，供面板置顶主控机
+        master_host = _platform.node()
+        result = store.list_agents()
+        for a in result:
+            a["is_master"] = (a.get("hostname") or "") == master_host
+        return result
 
     @app.get("/api/messages")
     def messages(limit: int = Query(100, ge=1, le=1000),

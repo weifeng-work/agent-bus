@@ -25,6 +25,13 @@
   .host-header { display: flex; align-items: center; gap: 10px; padding: 8px 14px;
                  background: #eef0f7; border-bottom: 1px solid var(--border); font-weight: 600; font-size: 13px; }
   .host-header .os-tag { font-size: 11px; padding: 2px 9px; border-radius: 999px; background: var(--brand); color: #fff; font-weight: 600; }
+  .host-header .master-tag { font-size: 11px; padding: 2px 9px; border-radius: 999px; background: #ffd800; color: #6b4f00; font-weight: 700; }
+  .host-header .node-badge { display: inline-flex; align-items: center; gap: 6px; margin-left: 10px;
+          font-size: 12px; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--card); }
+  .host-header .node-badge .node-name { font-weight: 600; color: var(--text); }
+  .host-header .node-badge .node-state { font-size: 11px; color: var(--muted); }
+  .host-header .node-badge.on { border-color: rgba(29,201,129,.4); }
+  .host-header .node-badge.off { border-color: var(--border); opacity: .7; }
   .host-header .host-count { margin-left: auto; font-size: 11px; color: var(--muted); font-weight: 500; }
   .chips { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 14px; }
   .chip { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--border);
@@ -272,28 +279,48 @@ async function doSetup() {
 let teamNameCache = "";
 
 function renderAgents(agents) {
+  // 主控机（运行 bus_server 的机器）置顶；其余按平台+主机名排序
   const hostMap = new Map();
   for (const a of agents) {
     const host = a.hostname || "_unknown";
     if (!hostMap.has(host)) hostMap.set(host, []);
     hostMap.get(host).push(a);
   }
+  const keyMaster = a => a.is_master ? 0 : 1;
   const hosts = [...hostMap.entries()].sort((a, b) => {
+    const ma = keyMaster(a[1][0]), mb = keyMaster(b[1][0]);
+    if (ma !== mb) return ma - mb;  // 主控排最前
     const pa = a[1][0].platform || "zzz", pb = b[1][0].platform || "zzz";
     return pa !== pb ? (pa < pb ? -1 : 1) : (a[0] < b[0] ? -1 : 1);
   });
+
   let html = "";
   for (const [host, list] of hosts) {
     const plat = list[0].platform || "unknown";
     const osLabel = OS_LABEL[plat] || plat;
     const hostLabel = host === "_unknown" ? "未知主机" : host;
-    const onlineN = list.filter(a => a.online).length;
+    const isMaster = list.some(a => a.is_master);
+    // 该电脑上的 comm node（中间桥梁，exe=comm_node）
+    const node = list.find(a => /comm_node/.test(a.executor || ""));
+    const nodeBadge = node
+      ? `<span class="node-badge ${node.online ? "on" : "off"}">
+           <span class="dot ${node.online ? "" : "off"}"></span>
+           <span class="node-name">${esc(node.name || node.agent_id)}</span>
+           <span class="node-state">${node.online ? "在线" : "离线"}</span>
+         </span>`
+      : "";
+    // 只展示"执行器"（非 comm node），node 已在头部展示
+    const agentsOnly = list.filter(a => !/comm_node/.test(a.executor || ""));
+    const onlineN = agentsOnly.filter(a => a.online).length;
     html += `<div class="host-group">
       <div class="host-header">
-        <span class="os-tag">${esc(osLabel)}</span><span>${esc(hostLabel)}</span>
-        <span class="host-count">${onlineN}/${list.length} 在线</span>
+        <span class="os-tag">${esc(osLabel)}</span>
+        ${isMaster ? `<span class="master-tag">主控</span>` : ""}
+        <span>${esc(hostLabel)}</span>
+        ${nodeBadge}
+        <span class="host-count">${onlineN}/${agentsOnly.length} 执行器在线</span>
       </div>
-      <div class="chips">${list.map(agentChip).join("")}</div>
+      <div class="chips">${agentsOnly.map(agentChip).join("") || '<span class="exe">（无执行器）</span>'}</div>
     </div>`;
   }
   document.getElementById("agents").innerHTML = html || '<div class="exe">暂无注册节点</div>';
