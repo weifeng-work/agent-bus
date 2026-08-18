@@ -154,10 +154,23 @@ $serviceArgsStr = ($serviceArgs | ForEach-Object {
     if ($_ -match '\s') { "`"$_`"" } else { $_ }
 }) -join " "
 
-# 先确保旧服务已移除
-& $nssm stop AgentBusCore confirm 2>$null | Out-Null
-& $nssm remove AgentBusCore confirm 2>$null | Out-Null
-Start-Sleep 1
+# 先确保旧服务已移除（幂等：仅当服务已存在时才清理，
+# 避免全新安装时 nssm 报 Can't open service! 在 Stop 模式下被当终止错误中断）
+if (Get-Service AgentBusCore -ErrorAction SilentlyContinue) {
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $nssm stop AgentBusCore confirm 2>$null | Out-Null
+        & $nssm remove AgentBusCore confirm 2>$null | Out-Null
+    } catch {
+        Write-Host "  清理旧服务失败（可忽略，继续安装）: $($_.Exception.Message)" -ForegroundColor DarkGray
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+    Start-Sleep 1
+} else {
+    Write-Host "  无旧服务 AgentBusCore，跳过清理" -ForegroundColor DarkGray
+}
 
 # 安装服务
 & $nssm install AgentBusCore $py $serviceArgsStr 2>&1 | Out-Null
