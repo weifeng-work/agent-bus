@@ -12,6 +12,7 @@
 # 用法:
 #   powershell -ExecutionPolicy Bypass -File scripts\setup_tray.ps1 `
 #     -InstallDir <dir> -Executor codebuddy -AgentId host-xxxx
+#   非管理员权限时自动提重运行（注册 NSSM 服务需要）
 #
 # 参数:
 #   -Queue              队列标识（可选，用于区分不同队伍）
@@ -26,6 +27,20 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# ---------- 0. 管理员权限检查 ----------
+# 注册 NSSM 服务需要管理员权限，非管理员时自动提权重启
+if (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
+    Write-Host "  需要管理员权限，正在提权重启..." -ForegroundColor Yellow
+    $myArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+    foreach ($arg in $MyInvocation.BoundParameters.Keys) {
+        $val = $MyInvocation.BoundParameters[$arg]
+        if ($val -is [switch]) { if ($val) { $myArgs += " -$arg" } }
+        else { $myArgs += " -$arg `"$val`"" }
+    }
+    Start-Process powershell -Verb RunAs -ArgumentList $myArgs
+    exit
+}
 
 # ---------- 0. Python 检测 ----------
 $py = $null

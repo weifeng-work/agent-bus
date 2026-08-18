@@ -1,6 +1,6 @@
 ﻿# Agent Bus Windows 子设备一键加入（NSSM 服务化版本，Phase 4）
 #
-# 在目标 Windows 机器上以【管理员权限】PowerShell 运行（需要管理员权限注册 NSSM 服务）:
+# 在目标 Windows 机器上以普通权限 PowerShell 运行即可（非管理员时自动提权）:
 #
 #   片段一（推荐，让智能体照做）:
 #     "用 https://github.com/weifeng-work/agent-bus 把 agent-bus 作为工作节点装到我这台
