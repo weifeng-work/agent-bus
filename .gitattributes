@@ -2,3 +2,4 @@
 *.py text eol=lf
 *.md text eol=lf
 *.html text eol=lf
+scripts/git_hooks/pre-receive text eol=lf
