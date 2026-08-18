@@ -35,7 +35,6 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 
-from agent_bus import crypto  # noqa: E402
 from agent_bus import state_machine  # noqa: E402
 
 log = logging.getLogger("core_node")
@@ -420,19 +419,19 @@ class CoreNode:
         cmd = payload.get("cmd", "")
         sender_id = msg.get("sender_id", "")
 
-        # 1. sender 身份检查
-        if not crypto.is_hub_message(sender_id):
-            log.warning("[%s] 拒绝非 hub 控制消息 from=%s", self.agent_id, sender_id)
-            self._reply(msg, status="error", error="拒绝：控制消息仅接受 hub 身份发送")
+        # MVP 对称化：局域网可信，去掉 hub 身份限制——任意注册节点可互相遥控。
+        # sender_id 仅用于日志/回执，不再做白名单校验。
+        if not sender_id:
+            self._reply(msg, status="error", error="消息缺少 sender_id")
             return
 
-        # 2. shell_control 开关
+        # shell_control 开关：托盘菜单"受控能力"可关闭（熔断）
         if not self.shell_control:
             self._reply(msg, status="error", error="shell_control_disabled")
             self._log_control(msg, payload, -1, "拒绝：shell 受控能力未开启")
             return
 
-        # 3. 执行
+        # 执行
         cwd = payload.get("cwd") or None
         timeout = float(payload.get("timeout_seconds", 60))
         try:

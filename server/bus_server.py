@@ -40,6 +40,9 @@ OFFLINE_AFTER_SECONDS = 90.0
 BASE_DIR = Path(__file__).resolve().parent
 ROOT_DIR = BASE_DIR.parent
 
+# 静态目录（web 面板）：默认 BASE_DIR/static，打包后可被 control_app 覆盖
+_STATIC_DIR = str(BASE_DIR / "static")
+
 # ---------------------------------------------------------------------------
 # 存储
 # ---------------------------------------------------------------------------
@@ -394,7 +397,10 @@ def create_app(store: Store, files_dir: Path, bridge: MqttBridge,
 
     # ---- 静态 ----
 
-    static_dir = BASE_DIR / "static"
+    # 静态目录：核心路径优先，可被 control_app 注入覆盖（打包后指向解出的 index.html）
+    static_dir = Path(_STATIC_DIR)
+    if not static_dir.is_dir():
+        static_dir = BASE_DIR / "static"
     if static_dir.is_dir():
         app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
 
@@ -404,6 +410,35 @@ def create_app(store: Store, files_dir: Path, bridge: MqttBridge,
 # ---------------------------------------------------------------------------
 # 入口
 # ---------------------------------------------------------------------------
+
+
+def serve_bus_server(host="0.0.0.0", port=8000,
+                     broker_host="127.0.0.1", broker_port=1883,
+                     db=None, files_dir=None, static_dir=None):
+    """编程式启动中间架构服务（控制节点 hub 内联用）。
+
+    返回 (store, bridge, app, uvicorn_server)；调用方可 start/stop。
+    db/files_dir/static_dir 可注入（打包后指向应用数据目录，而非模块 ROOT）。
+    """
+    if db is None:
+        db = str(ROOT_DIR / "data" / "bus.db")
+    if files_dir is None:
+        files_dir = str(ROOT_DIR / "data" / "files")
+
+    store = Store(Path(db))
+    bridge = MqttBridge(store, broker_host, broker_port)
+    bridge.start()
+
+    if static_dir is not None:
+        import server.bus_server as _mod
+        _mod._STATIC_DIR = str(static_dir)
+    app = create_app(store, Path(files_dir), bridge, broker_port=broker_port)
+
+    config = uvicorn.Config(app, host=host, port=port, log_level="info")
+    uv_server = uvicorn.Server(config)
+    log.info("中间架构服务端启动(编程) %s:%s (broker=%s:%s)",
+             host, port, broker_host, broker_port)
+    return store, bridge, app, uv_server
 
 
 def main():
@@ -416,14 +451,11 @@ def main():
     ap.add_argument("--files-dir", default=str(ROOT_DIR / "data" / "files"))
     args = ap.parse_args()
 
-    store = Store(Path(args.db))
-    bridge = MqttBridge(store, args.broker_host, args.broker_port)
-    bridge.start()
-    app = create_app(store, Path(args.files_dir), bridge, broker_port=args.broker_port)
-
-    log.info("中间架构服务端启动 %s:%s (broker=%s:%s)",
-             args.host, args.port, args.broker_host, args.broker_port)
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    store, bridge, app, uv_server = serve_bus_server(
+        host=args.host, port=args.port,
+        broker_host=args.broker_host, broker_port=args.broker_port,
+        db=args.db, files_dir=args.files_dir)
+    uv_server.run()
 
 
 if __name__ == "__main__":

@@ -16,9 +16,73 @@ import threading
 import time
 
 DISCOVERY_PORT = 41830
+# 发现端口池：默认 41830 被占用/winNAT 干扰时逐个回退（UDP）
+DISCOVERY_PORT_POOL = [41830, 41831, 41832, 41840, 41850]
+# MQTT 端口池（中心 broker 用，防止 1883 被 winNAT/WSL 等占用）
+MQTT_PORT_POOL = [1883, 1884, 1885, 8883, 18830]
+# HTTP 端口池（bus_server 用）
+HTTP_PORT_POOL = [8000, 8001, 8002, 8010, 8088]
+
 BEACON_INTERVAL = 3.0
 PROTO = "agent-bus"
 PROTO_VER = 1
+
+
+def udp_port_free(port: int) -> bool:
+    """探测本进程能否占用一个 UDP 端口（发现用）。"""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("", port))
+        s.close()
+        return True
+    except OSError:
+        try:
+            s.close()
+        except Exception:
+            pass
+        return False
+
+
+def tcp_port_free(port: int, host="127.0.0.1") -> bool:
+    """探测 TCP 端口是否空闲（broker/server 子进程将 bind 它）。"""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind((host, port))
+        s.listen(1)
+        s.close()
+        return True
+    except OSError:
+        try:
+            s.close()
+        except Exception:
+            pass
+        return False
+
+
+def pick_mqtt_port() -> int:
+    """选空闲 MQTT 端口（探测不占用，broker 子进程 bind）。"""
+    for p in MQTT_PORT_POOL:
+        if tcp_port_free(p):
+            return p
+    return MQTT_PORT_POOL[0]  # 全忙则退回默认（broker 会尝试）
+
+
+def pick_http_port() -> int:
+    """选空闲 HTTP 端口（探测不占用，bus_server 子进程 bind）。"""
+    for p in HTTP_PORT_POOL:
+        if tcp_port_free(p):
+            return p
+    return HTTP_PORT_POOL[0]
+
+
+def pick_discovery_port() -> int:
+    """选空闲 UDP 发现端口（本进程占用）。"""
+    for p in DISCOVERY_PORT_POOL:
+        if udp_port_free(p):
+            return p
+    return DISCOVERY_PORT_POOL[0]
 
 
 class BeaconBroadcaster:
@@ -108,3 +172,110 @@ def scan_teams(timeout: float = 5.0) -> list:
             cur.extend(x for x in b["ips"] if x and x not in cur)
     sock.close()
     return [teams[t] for t in order]
+
+
+# ---------------------------------------------------------------------------
+# 对称控制节点发现：每个节点既是广播者也是扫描者（无主从）
+# ---------------------------------------------------------------------------
+
+
+class ControlAdvertiser:
+    """控制节点自广播：把本节点的身份、总线地址、受控能力广播到局域网。
+
+    与 BeaconBroadcaster（主机/队伍向心广播）不同，这是控制节点对等广播，
+    用于让局域网内其他控制节点“像 LocalSend 一样”发现自己。
+    beacon 内容（get_beacon 返回 dict）:
+      proto, ver, type="sym_ctl", agent_id, name, host_name, ips,
+      mqtt_host, mqtt_port, http_port, controlled, discovery_port
+    """
+
+    def __init__(self, get_beacon, discovery_port: int = DISCOVERY_PORT):
+        self.get_beacon = get_beacon
+        self.discovery_port = discovery_port
+        self._stop = threading.Event()
+        self._thread = None
+        self._sock = None
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, daemon=True, name="ctl-beacon")
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+
+    def _run(self):
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        while not self._stop.wait(BEACON_INTERVAL):
+            try:
+                b = self.get_beacon()
+                if not b:
+                    continue
+                payload = json.dumps(b, ensure_ascii=False).encode("utf-8")
+                targets = [("255.255.255.255", self.discovery_port)]
+                for ip in b.get("ips") or []:
+                    if ip.count(".") == 3 and not ip.startswith("127."):
+                        targets.append((ip.rsplit(".", 1)[0] + ".255", self.discovery_port))
+                for t in dict.fromkeys(targets):
+                    self._sock.sendto(payload, t)
+            except OSError:
+                pass
+
+
+def scan_control_nodes(timeout: float = 3.0,
+                       discovery_port: int = DISCOVERY_PORT) -> list:
+    """扫描局域网内所有控制节点（对等发现）。
+
+    返回按发现顺序去重后的列表（按 agent_id 去重）:
+      {agent_id, name, host_name, host_ip, mqtt_host, mqtt_port,
+       http_port, controlled, discovery_port, is_master}
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind(("", discovery_port))
+    except OSError:
+        # 发现端口被别的同机进程占用：退到 0（仅监听回落广播收不到？改用系统分配）
+        try:
+            sock.bind(("", 0))
+        except OSError:
+            sock.close()
+            return []
+    sock.settimeout(0.4)
+    nodes, order = {}, []
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            data, (ip, _p) = sock.recvfrom(4096)
+        except socket.timeout:
+            continue
+        except OSError:
+            break
+        try:
+            b = json.loads(data.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if b.get("proto") != PROTO or b.get("type") != "sym_ctl":
+            continue
+        aid = b.get("agent_id") or ""
+        if not aid:
+            continue
+        if aid not in nodes:
+            nodes[aid] = {
+                "agent_id": aid,
+                "name": b.get("name", aid),
+                "host_name": b.get("host_name", ""),
+                "host_ip": ip,
+                "mqtt_host": b.get("mqtt_host", ip),
+                "mqtt_port": int(b.get("mqtt_port", 1883)),
+                "http_port": int(b.get("http_port", 8000)),
+                "controlled": bool(b.get("controlled", True)),
+                "discovery_port": int(b.get("discovery_port", discovery_port)),
+                "is_master": bool(b.get("is_master", False)),
+                "last_seen": time.time(),
+            }
+            order.append(aid)
+        else:
+            nodes[aid]["last_seen"] = time.time()
+    sock.close()
+    return [nodes[a] for a in order]
