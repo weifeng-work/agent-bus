@@ -1,12 +1,13 @@
 # 通信节点架构设计（Comm Node Architecture）
 
-> 版本：v0.4（评审修订）
-> 状态：待评审
+> 版本：v0.5（重构基线冻结，Phase 0）
+> 状态：已冻结边界（D1–D9 已定案，待按 Phase 1–5 实施）
 > 关联：需求清单.md 需求1（用户机执行器自愈闭环）；docs/protocol.md（通信契约 v1.0）
 > 基线事实：broker `allow_anonymous true`（v2 匿名化，git 4c805e7）；`/api/join` 免口令；面板/API 全匿名
 > v0.2：三进程关系；control_key + HMAC 配对；shell_control 一次性开关；受控可见性；远程运维 M5；提权方案
 > v0.3：提权方案 B 已采纳；新增「对话路由层」（任意入队智能体经通信节点互相对话，匿名授权，与控制层分离）；明确 control_key 输入位置（主控生成、受控机安装时人工输入，不走网络）
 > v0.4：配对机制改为「一次性安装码 + 本地派生长期密钥」——安装码（8 位短码，15 分钟有效，一次性）完全不过网络，两端各自本地派生配对密钥 K=HKDF(安装码)，proof 校验握手后即作废；明确验签≠加密（消息明文走局域网，仅 HMAC 验签，CPU 负担微秒级可忽略）
+> v0.5：重构基线冻结（Phase 0）——三组件形态（core_node / tray_app / SCM 服务）、state.json 状态机、服务化自愈层级、Layer 1 协议边界冻结；决策 D1–D9 定案（见 §12）
 
 ---
 
@@ -67,7 +68,7 @@
 - 两者运行**同一程序**，`--role hub|worker` 区分；自愈/监督/熔断/状态逻辑 100% 复用。
 - 通信节点 = 常驻进程（即需求1的"托盘壳"）。托盘 UI 是**该进程的交互面**（状态灯 + 菜单），不是独立进程，不参与保活层级。
 
-### 2.3 三层自愈（复用需求1设计）
+### 2.3 三层自愈（复用需求1设计）——重构后服务化自愈见 §12
 
 ```
 [OS 计划任务] 分钟级 → 拉起通信节点进程（watchdog）
@@ -116,7 +117,7 @@
 
 ---
 
-## 4. 通信节点内部结构（进程模型）
+## 4. 通信节点内部结构（进程模型）——重构后拆分为 core_node / tray_app，见 §12
 
 ```
 通信节点进程（comm_node.py）
@@ -314,7 +315,7 @@ task_request payload 增加字段: op
 
 ## 8. 部署与安装
 
-### 8.1 受控端（worker，Windows）——一次性
+### 8.1 受控端（worker，Windows）——一次性（重构后 NSSM 服务化，见 §12）
 
 - `scripts/setup_worker_windows.ps1`：装 Python/依赖 → join（匿名入队）→ **输入 -PairCode 配对**（可选 -EnableShellControl）→ 生成 `start_tray.bat` + 注册计划任务 + 启动托盘壳。
 - 计划任务（schtasks，交互式用户会话）：
@@ -338,7 +339,7 @@ task_request payload 增加字段: op
 
 | 里程碑 | 内容 | 验收 |
 |---|---|---|
-| **M1 worker 托盘壳**（= 需求1） | comm_node.py（worker 形态）：三层自愈 + 监督 + 熔断 + 真实状态灯 + 托盘菜单 + watchdog + setup 集成 | headless 冒烟：子进程崩溃秒级重启、状态文件驱动灯色、开关熔断 |
+| **M1 worker 托盘壳**（= 需求1，重构版） | core_node（服务）+ tray_app（托盘）分离：state.json 状态机 + 服务化自愈 + 托盘纯 UI + NSSM 服务 | 服务+托盘分离运行；状态机切换正确；SCM 自愈生效（强杀 5s 内重启） |
 | **M2 主控 hub** | hub 形态：对话路由/代理/授权/审计；mcp_server 接 hub | hub 代智能体发任务、控制消息验签生效、审计可查 |
 | **M3 shell/fs 能力** | shell_exec/fs + 一次性安装码配对 + shell_control 开关 + 受控可见性（气泡/记录） | 主控经 hub 对 worker 执行命令，验签/开关/记录全链路 |
 | **M4 执行器插件化** | executor_activate/deactivate（本地） | 远程激活/停用执行器，崩溃自动重启 |
@@ -376,3 +377,54 @@ task_request payload 增加字段: op
 | O5 | 提权方案 | **已定并采纳**：方案 B 最高权限计划任务，M6（§7.2） |
 | O6 | 提权通道的独立审计与告警强度 | 待 M6 设计时细化（建议：提权操作额外发一条高亮审计） |
 | O7 | 对话路由的 `via` 审计字段是否需要前端展示 | 待 M2 评审时定（面板消息时间线展示路由节点） |
+
+---
+
+## 12. 重构基线（v0.5 冻结，Phase 0）
+
+> 本节约定重构落地后的目标形态，作为 Phase 1–5 实施的唯一基线。实施完成前，§2–§8 的旧形态描述仍是当前代码现状。
+
+### 12.1 三组件形态（职责分离）
+
+| 组件 | 文件 | 运行形态 | 职责 |
+|---|---|---|---|
+| **core_node**（Layer 1 底层控制通道） | `executor/core_node.py`（由 comm_node.py 改造） | Windows SCM 服务（SYSTEM 权限） | MQTT 总线连接、shell_exec / executor_* / upgrade 验签执行、执行器进程树监督；**剥离全部 pystray GUI 与状态灯**；固化后极少变动 |
+| **tray_app**（Layer 2+ 可视化前端） | `executor/tray_app.py`（新增） | 用户桌面会话（登录即起） | 读 state.json + 心跳显示红/黄/绿灯；「启用 / 彻底退出」写状态机；轮询 control.log 弹通知气泡；**不含业务与控制逻辑** |
+| **SCM 看门狗** | Windows 服务管理器（NSSM / WinSW 包装） | 系统服务 | 最终守护者：core_node 崩溃/自杀后自动重启；disabled 状态休眠不拉起 |
+
+### 12.2 状态机（持久化，解耦「手动关闭」与「自动拉起」）
+
+- 文件：`data/runtime/state.json`，**原子写**（临时文件 + rename）。
+- 枚举：`active`（运行态，Watchdog 必须拉起）/ `disabled`（停用态，Watchdog 停止拉起并杀进程）。
+- 托盘「彻底退出」= 写 `disabled`；「启用」= 写 `active`（打开托盘默认**不**自动激活，需显式启用，D7）。
+
+### 12.3 服务化自愈层级（替代原三层自愈）
+
+```
+[Windows SCM]              最终守护 → core_node 崩溃/自杀 5s 内 restart
+[core_node 内部 watchdog]   心跳过期(<30s) → 主动退出，触发 SCM 重启（防卡死）
+[core_node]                秒级 → 监督/拉起执行器子进程（崩溃即重启）
+[执行器]                    承载 → 智能体任务逻辑
+```
+
+- 原 schtasks（AgentBusShell / AgentBusShellWatchdog）**废弃**，升级脚本强制清理（D5）。
+
+### 12.4 前置决策定案（D1–D9）
+
+| # | 决策 | 定案 |
+|---|---|---|
+| D1 | 网络形态 | 保持 MQTT 出站，不引入入站监听 |
+| D2 | SCM 注册方式 | NSSM 包装 Python 脚本（备选 WinSW） |
+| D3 | 进程关系 | core_node 直接注册为服务 + 内部 watchdog 线程 |
+| D4 | 执行器管理 | core_node 保留拉/停执行器 + 监督存活，执行器代码剥离 |
+| D5 | 旧计划任务清理 | 升级脚本强制清理 schtasks（硬要求） |
+| D6 | 安装目录与权限 | `%LOCALAPPDATA%\agent-bus`；Python 全用户安装或内嵌解释器 |
+| D7 | 托盘重开行为 | 打开托盘默认不自动激活，需显式「启用」 |
+| D8 | 受控可见性链路 | core_node 写 control.log → 托盘轮询 → 通知气泡 |
+| D9 | 本地 IPC | 命名事件通知 + state.json 文件兜底 |
+
+### 12.5 Layer 1 协议边界冻结（不再新增）
+
+- 控制面 op 白名单：`shell_exec` / `executor_activate` / `executor_deactivate` / `upgrade` —— **冻结，不再新增**。
+- 新增能力一律走 Layer 2（执行器插件化 / 对话路由），不得扩 core_node 控制面。
+- 控制消息验签（HMAC-SHA256，§6.1）不变；签名 payload 增加时间戳与序号防重放（C1 加固）。

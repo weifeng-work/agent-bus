@@ -139,10 +139,6 @@ class TrayGui:
         threading = __import__("threading")
         threading.Thread(target=self.node.collect_diagnostics, daemon=True).start()
 
-    def _quit(self, icon, item):
-        self.node.set_controlled(False)
-        self.node._stop.set()
-        icon.stop()
 
     # ---------------- 运行时 ----------------
 
