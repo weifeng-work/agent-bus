@@ -1,6 +1,8 @@
-# Agent Bus 通信契约 v1.0
+# Agent Bus 通信契约 v1.2
 
 所有跨节点消息均为 UTF-8 JSON，通过 MQTT 传递（QoS 1）。
+
+> 版本记录：v1.1 增 `task_progress` / `session_input`；v1.2 增 `git_event`（中心仓协作，§2.7）。
 
 ## 1. MQTT 主题设计
 
@@ -10,6 +12,7 @@
 | `bus/register` | Agent → 总线 | 注册声明（保留消息） |
 | `bus/heartbeat/{agent_id}` | Agent → 总线 | 心跳（默认 30s 一次） |
 | `bus/offline/{agent_id}` | Broker → 总线 | MQTT 遗嘱（LWT），异常掉线时自动发布 |
+| `bus/git_event` | Agent → 总线 | Git 中心仓协调事件广播（§2.7） |
 
 ## 2. 报文规范
 
@@ -152,6 +155,32 @@ Agent 启动后发布到 `bus/register`（retain=true，新加入者可立即获
 ```
 
 `task_result.status` 枚举相应扩展为 `success | error | timeout | cancelled`。
+
+### 2.7 Git 事件 `git_event`（v1.2 新增，中心仓协作）
+
+Git 中心仓的协调语义广播（设计见 docs/git_central_repo.md §6）。发布到 `bus/git_event`
+（bus_server 经既有 `bus/#` 订阅全量入库，面板时间线可检索，服务端无需改动）。
+审查/合并的**触发**不走本报文，仍用定向 `task_request`（§2.2）；本报文只做留痕与通报。
+
+```json
+{
+  "protocol_version": "1.0",
+  "type": "git_event",
+  "sender_id": "codebuddy_pc1",
+  "payload": {
+    "event": "pushed",
+    "repo": "agent-bus",
+    "branch": "task/8a3f2b1c",
+    "commit": "edd6948",
+    "note": "可选说明"
+  },
+  "ts": 1773400050.0
+}
+```
+
+`payload.event` 枚举：`pushed`（任务分支已推送）｜ `review_request`（请求审查）｜
+`merged`（已合入 main）｜ `pull_advisory`（建议各节点同步 main）。
+`commit`、`note` 可选。
 
 ## 3. 在线状态判定
 

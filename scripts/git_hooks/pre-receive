@@ -1,0 +1,50 @@
+#!/bin/sh
+# agent-bus 中心仓 pre-receive 防护钩子（方案 docs/git_central_repo.md §4.1）
+# 规则:
+#   1) 分支名白名单: main | task/<8位hex>（与总线 task_tag 对齐）
+#   2) 禁止非快进(force)推送；禁止删除 main（task/* 分支可删）
+#   3) 单文件 >10MB 硬拦（倒逼 LFS）
+#   4) main 推送放行但告警（匿名下无法区分推送者，唯一合法写入口为 reviewer）
+# 诚实边界: 约定级防呆，非安全级鉴权；追责靠 commit author + bus 审计。
+ZERO=0000000000000000000000000000000000000000
+MAX=10485760
+rc=0
+while read old new ref; do
+  # ---- 删除 ----
+  if [ "$new" = "$ZERO" ]; then
+    case "$ref" in
+      refs/heads/task/*) echo "[hook] allow delete $ref" >&2; continue ;;
+      *) echo "[hook] REJECT delete $ref" >&2; rc=1; continue ;;
+    esac
+  fi
+  # ---- 分支名白名单 ----
+  if ! printf '%s\n' "$ref" | grep -Eq '^refs/heads/(main|task/[0-9a-f]{8})$'; then
+    echo "[hook] REJECT branch $ref (allowed: main | task/<8hex>)" >&2
+    rc=1; continue
+  fi
+  # ---- main 告警 ----
+  if [ "$ref" = "refs/heads/main" ]; then
+    echo "[hook] WARN main push (合法写入口应仅 reviewer，审计入 daemon 日志)" >&2
+  fi
+  # ---- 非快进(force)检测 ----
+  if [ "$old" != "$ZERO" ]; then
+    if ! git merge-base --is-ancestor "$old" "$new" 2>/dev/null; then
+      echo "[hook] REJECT non-fast-forward(force) -> $ref" >&2
+      rc=1; continue
+    fi
+    range="$old..$new"
+  else
+    range="$new --not --branches"
+  fi
+  # ---- 大文件硬拦 ----
+  big=$(git rev-list --objects $range 2>/dev/null | cut -d' ' -f1 | sort -u | while read sha; do
+    [ "$(git cat-file -t "$sha" 2>/dev/null)" = "blob" ] || continue
+    size=$(git cat-file -s "$sha" 2>/dev/null || echo 0)
+    [ "$size" -gt "$MAX" ] && echo "$sha($size bytes)"
+  done)
+  if [ -n "$big" ]; then
+    echo "[hook] REJECT blob >10MB: $big" >&2
+    rc=1; continue
+  fi
+done
+exit $rc
