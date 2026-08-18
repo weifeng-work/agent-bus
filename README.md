@@ -34,13 +34,18 @@
 在一台 Windows/Linux 机器上跑一键引导：
 
 ```powershell
-# Windows 或 Linux
-python -c "import urllib.request,sys; urllib.request.urlretrieve('https://raw.githubusercontent.com/weifeng-work/agent-bus/main/scripts/setup_host.py','host.py')"
-python host.py
+# Windows
+curl.exe -L https://github.com/weifeng-work/agent-bus/archive/refs/heads/main.zip -o agent-bus.zip
+Expand-Archive agent-bus.zip -DestinationPath . -Force
+cd agent-bus-main
+python scripts/setup_host.py
 ```
 ```bash
-# 或 Bash 一行
-curl -fsSL https://raw.githubusercontent.com/weifeng-work/agent-bus/main/scripts/setup_host.py -o host.py && python host.py
+# Linux / macOS
+curl -L https://github.com/weifeng-work/agent-bus/archive/refs/heads/main.zip -o agent-bus.zip
+unzip agent-bus.zip
+cd agent-bus-main
+python scripts/setup_host.py
 ```
 
 完成后：
@@ -79,11 +84,13 @@ curl -fsSL https://raw.githubusercontent.com/weifeng-work/agent-bus/main/scripts
 ### 方式 B：手动安装
 
 ```powershell
-# 下载安装脚本
-irm https://raw.githubusercontent.com/weifeng-work/agent-bus/main/scripts/setup_worker_windows.ps1 -o C:\setup_worker.ps1
+# 下载项目完整代码
+curl.exe -L https://github.com/weifeng-work/agent-bus/archive/refs/heads/main.zip -o agent-bus.zip
+Expand-Archive agent-bus.zip -DestinationPath . -Force
+cd agent-bus-main
 
-# 以管理员身份运行（需要管理员权限注册 NSSM 服务）
-powershell -ExecutionPolicy Bypass -File C:\setup_worker.ps1 -Queue myteam -EnableShellControl
+# 运行安装脚本（非管理员时自动弹 UAC 提权）
+powershell -ExecutionPolicy Bypass -File scripts\setup_worker_windows.ps1 -Queue myteam -EnableShellControl
 ```
 
 | 参数 | 说明 |
