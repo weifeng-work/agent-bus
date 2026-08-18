@@ -179,8 +179,9 @@ class CoreNode:
         # 执行器身份
         self.executor_agent_id = getattr(args, "executor_agent_id", "") or self.agent_id
 
-        # 队列标识
-        self.queue = getattr(args, "queue", "") or ""
+        # 队列标识：优先从 bus.env 读取（避免 NSSM 命令行参数编码链损坏中文），
+        # 回落命令行参数（兼容旧版直接调用）
+        self.queue = self.bus_env.get("QUEUE_NAME", "") or getattr(args, "queue", "") or ""
 
         # 运行时状态
         self.child = None

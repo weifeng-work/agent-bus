@@ -102,9 +102,7 @@ def _run_core_node(args):
         cmd += ["--executor-agent-id", args.executor_agent_id]
     if args.enable_shell_control:
         cmd += ["--enable-shell-control"]
-    if args.queue:
-        cmd += ["--queue", args.queue]
-
+    # 队列名通过 bus.env 读取，不经过 NSSM 命令行参数传递（避免中文编码损坏）
     log.info("委托 core_node: %s", " ".join(cmd))
 
     # 直接替换进程（NSSM 会监控本进程的退出状态）
@@ -137,8 +135,6 @@ def cmd_install(args):
         core_args += ["--executor-agent-id", args.executor_agent_id]
     if args.enable_shell_control:
         core_args += ["--enable-shell-control"]
-    if args.queue:
-        core_args += ["--queue", args.queue]
 
     python_exe = _get_python_exe()
 

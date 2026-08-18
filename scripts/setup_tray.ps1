@@ -156,7 +156,7 @@ $serviceArgs = @(
     "--executor", $Executor,
     "--executor-agent-id", $AgentId
 )
-if ($Queue) { $serviceArgs += "--queue"; $serviceArgs += $Queue }
+# 队列名通过 bus.env 传递，避免 NSSM AppParameters 编码链损坏中文
 if ($EnableShellControl) { $serviceArgs += "--enable-shell-control" }
 $serviceArgsStr = ($serviceArgs | ForEach-Object {
     if ($_ -match '\s') { "`"$_`"" } else { $_ }
@@ -196,12 +196,20 @@ Write-Host "  服务 AgentBusCore 已注册（自动启动，崩溃 5s 后重启
 # bus.env：NSSM 服务以 LocalSystem 身份运行，Path.home() 指向 systemprofile 而非用户目录，
 # 读不到 ~/.config/agent-bus/bus.env → broker 回落 127.0.0.1 → 10061 拒绝连接。
 # 修复：把 bus.env 拷贝到安装目录下，服务通过 install_dir / "bus.env" 读取。
+# 同时写入 QUEUE_NAME（若指定），避免中文队列名经 NSSM AppParameters 编码链损坏。
 $userBusEnv = Join-Path $env:USERPROFILE ".config\agent-bus\bus.env"
 if (Test-Path $userBusEnv) {
     Copy-Item -Path $userBusEnv -Destination "$InstallDir\bus.env" -Force
     Write-Host "  bus.env 已部署到安装目录（LocalSystem 服务可读）" -ForegroundColor DarkGray
 } else {
     Write-Host "  警告: 未找到 $userBusEnv，服务可能无法连接总线" -ForegroundColor Yellow
+}
+if ($Queue) {
+    # 追加 QUEUE_NAME 到 bus.env（UTF-8 无 BOM，Python 端 load_env_file 正确解析）；
+    # 用 .NET AppendAllText 避免 PS 5.1 下 Add-Content -Encoding UTF8 写入 BOM 污染第一行 key
+    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+    [System.IO.File]::AppendAllText("$InstallDir\bus.env", "`nQUEUE_NAME=$Queue", $utf8NoBom)
+    Write-Host "  queue: $Queue（已写入 bus.env，经 UTF-8 传递，避免编码损坏）" -ForegroundColor DarkGray
 }
 
 # ---------- 5. 创建开始菜单快捷方式（代替计划任务拉起托盘） ----------
