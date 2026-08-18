@@ -3,9 +3,9 @@
 # 在目标 Windows 机器上以普通权限 PowerShell 运行即可（非管理员时自动提权）:
 #
 #   片段一（推荐，让智能体照做）:
-#     "用 https://github.com/weifeng-work/agent-bus 把 agent-bus 作为工作节点装到我这台
-#      Windows。先把 scripts/setup_worker_windows.ps1 下载并运行，加入队伍，再启动一个
-#      codebuddy 执行器。"
+#     用 https://github.com/weifeng-work/agent-bus 把 agent-bus 作为工作节点装到我这台
+#     Windows。先把 scripts/setup_worker_windows.ps1 下载并运行，加入队伍，再启动一个
+#     codebuddy 执行器。
 #
 #   片段二（手动/直接命令）:
 #   irm https://raw.githubusercontent.com/weifeng-work/agent-bus/main/scripts/setup_worker_windows.ps1 | iex
@@ -181,4 +181,4 @@ Write-Host "  服务     : AgentBusCore（NSSM，自动启动，崩溃 5s 重启
 Write-Host "  托盘 UI  : AgentBusTray 计划任务（onlogon，登录即起）"
 Write-Host "  在线验证 : 打开主机面板（http://<主机IP>:8000/）应看到 [$agentId] 在线"
 Write-Host "  日志     : $LogFile"
-Write-Host "  管理命令 : python scripts\agent_service.py status/stop/start/remove
+Write-Host "  管理命令 : python scripts\agent_service.py status/stop/start/remove"

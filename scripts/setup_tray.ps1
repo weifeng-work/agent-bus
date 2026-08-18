@@ -225,6 +225,6 @@ Write-Host "  托盘 UI: 已启动（状态灯: 绿=已连接 / 黄=重连中 / 
 Write-Host "  服务日志: $InstallDir\data\service.log"
 Write-Host "  托盘日志: $trayLogFile"
 Write-Host "  开始菜单: 开始菜单 → Agent Bus → Agent Bus Tray（恢复托盘用）"
-Write-Host "  管理命令: python scripts\agent_service.py status/stop/start/remove
+Write-Host "  管理命令: python scripts\agent_service.py status/stop/start/remove"
 if ($Queue) { Write-Host "  队列: $Queue" }
 if ($EnableShellControl) { Write-Host "  shell 受控能力: 已开启" }
