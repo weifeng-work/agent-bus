@@ -144,9 +144,10 @@ class Store:
     # ---- messages ----
 
     def log_message(self, topic: str, msg: dict):
-        # 心跳与遗嘱不入库：它们只反映节点在线/离线状态，非任务消息，
-        # 入库只会刷屏并淹没真实消息时间线
-        if topic.startswith("bus/heartbeat/") or topic.startswith("bus/offline/"):
+        # 仅心跳不入库（纯状态信号、无查看价值，且量极大）
+        # register/offline/task_progress 入库，作为"系统事件"由前端聚合展示，
+        # 与真实通信消息（task_request/task_result/git_event）分层呈现
+        if topic.startswith("bus/heartbeat/"):
             return
         target_id = msg.get("target_id", "")
         if msg.get("type") == "task_result" and not target_id and msg.get("correlation_id"):

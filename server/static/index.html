@@ -33,6 +33,12 @@
   .host-header .node-badge.on { border-color: rgba(29,201,129,.4); }
   .host-header .node-badge.off { border-color: var(--border); opacity: .7; }
   .host-header .host-count { margin-left: auto; font-size: 11px; color: var(--muted); font-weight: 500; }
+  .sys-events { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--card); }
+  .sys-events summary { cursor: pointer; padding: 10px 14px; font-weight: 600; font-size: 13px;
+          color: var(--muted); background: #fafbfc; user-select: none; }
+  .sys-events summary:hover { color: var(--brand); }
+  .sys-events table { border: none; border-radius: 0; }
+  .sys-events td, .sys-events th { padding: 6px 12px; font-size: 12px; }
   .chips { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 14px; }
   .chip { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--border);
           border-radius: 999px; padding: 3px 12px; background: var(--card); font-size: 13px;
@@ -96,12 +102,19 @@
   <h2>已注册智能体</h2>
   <div id="agents"></div>
 
-  <h2>消息时间线（任务与结果配对显示）<span id="refresh">每 3 秒自动刷新 · 心跳不入库</span></h2>
+  <h2>消息时间线（通信消息）<span id="refresh">每 3 秒自动刷新 · 心跳/注册等系统事件折叠在下方</span></h2>
   <table>
     <thead><tr><th style="width:170px">时间</th><th style="width:80px">类型</th>
       <th style="width:130px">发送方</th><th style="width:130px">接收方</th><th>内容摘要</th></tr></thead>
     <tbody id="messages"></tbody>
   </table>
+
+  <details id="sysEvents" class="sys-events" style="margin:10px 0;">
+    <summary class="sys-events-summary">系统事件 <span id="sysEventCount" class="muted"></span></summary>
+    <table class="sys-events-table">
+      <tbody id="sysEventRows"></tbody>
+    </table>
+  </details>
 
   <h2>文件（Claim-Check）</h2>
   <table>
@@ -120,7 +133,9 @@ function summarize(m) {
   const p = m._p;
   if (p.type === "task_request") return (p.payload?.instruction || "").slice(0, 80);
   if (p.type === "task_result") return `[${p.status}] ${(p.result?.output_text || p.error || "").slice(0, 80)}`;
-  if (p.type === "register") return `注册 · 能力: ${(p.capabilities || []).join(", ") || "-"}`;
+  if (p.type === "register") return `${p.name || p.agent_id || ""} 注册 · 能力: ${(p.capabilities || []).join(", ") || "-"}`;
+  if (p.type === "offline") return `${p.agent_id || ""} 节点离线`;
+  if (p.type === "task_progress") return `${p.phase || "running"} · ${(p.result?.output_text || "").slice(0, 60)}`;
   return "-";
 }
 
@@ -168,16 +183,23 @@ function msgRow(m, child = false, mark = "") {
     (isOpen ? `<tr class="detail" id="detail-${m.id}"><td colspan="5"><pre>${esc(detailText(m))}</pre></td></tr>` : "");
 }
 
+// 系统事件类型：不构成"真实通信"，折叠展示不进主消息时间线
+const SYSTEM_EVENT_TYPES = new Set(["register", "offline", "task_progress", "error", "sys"]);
+const isCommMsg = m => m._p && !SYSTEM_EVENT_TYPES.has(m._p.type);
+
 function renderMessages(msgs) {
-  const valid = [];
+  const comm = [];          // 真实通信消息（主时间线）
+  const sysEvents = [];     // 系统事件（折叠区）
   for (const m of msgs) {
     try { m._p = m.payload ? JSON.parse(m.payload) : {}; } catch { m._p = {}; }
-    if (m._p.type && m._p.type !== "heartbeat") valid.push(m);
+    if (!m._p.type || m._p.type === "heartbeat") continue;
+    (isCommMsg(m) ? comm : sysEvents).push(m);
   }
+  renderSysEvents(sysEvents);
 
   const groups = new Map();
   const singles = [];
-  for (const m of valid) {
+  for (const m of comm) {
     const isTask = m._p.type === "task_request" || m._p.type === "task_result";
     if (isTask && m.correlation_id) {
       if (!groups.has(m.correlation_id)) groups.set(m.correlation_id, { req: null, results: [], lastTs: 0 });
@@ -209,6 +231,30 @@ function renderMessages(msgs) {
     }
   }
   document.getElementById("messages").innerHTML = html || '<tr><td colspan="5" class="muted">暂无消息</td></tr>';
+}
+
+function sysEventLabel(type) {
+  return { register: "上线", offline: "离线", task_progress: "进度", error: "错误" }[type] || type;
+}
+
+function renderSysEvents(events) {
+  const countEl = document.getElementById("sysEventCount");
+  const rowsEl = document.getElementById("sysEventRows");
+  if (!countEl || !rowsEl) return;
+  // 倒序（最新在前），最多显示 50 条
+  const sorted = [...events].sort((a, b) => b.ts - a.ts).slice(0, 50);
+  countEl.textContent = `（近 ${events.length} 条）`;
+  if (!sorted.length) {
+    rowsEl.innerHTML = '<tr><td class="muted">暂无系统事件</td></tr>';
+    return;
+  }
+  rowsEl.innerHTML = sorted.map(m => `
+    <tr>
+      <td class="muted">${fmt(m.ts)}</td>
+      <td style="white-space:nowrap"><span class="pill reg">${esc(sysEventLabel(m._p.type))}</span></td>
+      <td>${esc(m.sender_id || "")}</td>
+      <td class="preview">${esc(summarize(m))}</td>
+    </tr>`).join("");
 }
 
 document.getElementById("messages").addEventListener("click", e => {
