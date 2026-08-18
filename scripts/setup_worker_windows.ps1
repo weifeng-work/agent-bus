@@ -98,6 +98,8 @@ if (Test-Path $InstallDir) {
         if (Test-Path $dataBackup) { Remove-Item $dataBackup -Recurse -Force }
         Move-Item "$InstallDir\data" $dataBackup -Force -ErrorAction SilentlyContinue
     }
+    # 覆盖重装修复：尽力删除旧目录；SilentlyContinue 吞错可能在句柄/权限残留时留下目录，
+    # 不能断言删除成功，交由下方统一处理（残留则改走 Content 覆盖拷贝，杜绝 Move 嵌套）
     Remove-Item $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 $zip = "$env:TEMP\agent-bus.zip"
@@ -110,7 +112,16 @@ foreach ($u in @(
 }
 if (-not $dl) { throw "下载失败：GitHub 与镜像均不可达。可在能上网的机器下载 main.zip 后拷贝为 $zip 重跑" }
 Expand-Archive -Path $zip -DestinationPath "$env:TEMP\agent-bus-extract" -Force
-Move-Item "$env:TEMP\agent-bus-extract\agent-bus-main" $InstallDir
+$extracted = "$env:TEMP\agent-bus-extract\agent-bus-main"
+if (Test-Path $InstallDir) {
+    # 旧目录未删净（句柄/权限残留）→ 用 Content 覆盖拷贝而非 Move，
+    # 否则 Move-Item 会把 agent-bus-main 移进已存在目录 → <dir>\agent-bus-main 嵌套子目录 → 根目录缺 requirements.txt
+    if (-not (Test-Path $extracted)) { throw "解压未生成期待目录：$extracted" }
+    Copy-Item -Path "$extracted\*" -Destination $InstallDir -Recurse -Force
+    Remove-Item $extracted -Recurse -Force -ErrorAction SilentlyContinue
+} else {
+    Move-Item $extracted $InstallDir
+}
 # B6：恢复 data/ 目录
 if (Test-Path "$env:TEMP\ab-data-backup") {
     Move-Item "$env:TEMP\ab-data-backup" "$InstallDir\data" -Force -ErrorAction SilentlyContinue
