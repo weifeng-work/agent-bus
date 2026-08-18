@@ -21,7 +21,6 @@
   #status { color: var(--muted); font-size: 12px; margin-left: auto; }
   main { max-width: 1100px; margin: 0 auto; padding: 20px 24px 60px; }
   h2 { font-size: 14px; color: var(--muted); font-weight: 600; margin: 24px 0 10px; }
-  /* 机器分组：组头标系统+主机名，组内智能体横向 chip 流（多机多节点不再拉长页面） */
   .host-group { margin-bottom: 12px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--card); }
   .host-header { display: flex; align-items: center; gap: 10px; padding: 8px 14px;
                  background: #eef0f7; border-bottom: 1px solid var(--border); font-weight: 600; font-size: 13px; }
@@ -52,7 +51,6 @@
   .pill.done { background: #e7f9f1; color: #0d8f5f; }
   .preview { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
   #refresh { margin-left: 12px; color: var(--muted); font-size: 12px; }
-  /* 任务/结果配对：结果子行 = 真实缩进 + 左侧粗竖条 + 明显底色 */
   tr.child td { background: #f2f4fa; }
   tr.child td:first-child { padding-left: 38px; box-shadow: inset 5px 0 0 #4b3fe3; }
   tr.child td:first-child::before { content: "└ "; color: #4b3fe3; font-weight: 700; }
@@ -66,14 +64,6 @@
   .chip .rm { color: #c53030; cursor: pointer; font-weight: 700; font-size: 13px;
               margin-left: 2px; opacity: .55; }
   .chip .rm:hover { opacity: 1; }
-  /* Tab 导航 */
-  .tabs { display: flex; gap: 4px; margin: 14px 0 4px; border-bottom: 1px solid var(--border); }
-  .tab { padding: 7px 18px; border: 1px solid transparent; border-bottom: none;
-         border-radius: 8px 8px 0 0; cursor: pointer; color: var(--muted); font-weight: 600; font-size: 13px;
-         background: transparent; }
-  .tab.active { background: var(--card); border-color: var(--border); color: var(--text); }
-  .tab-pane { display: none; }
-  .tab-pane.active { display: block; }
 </style>
 </head>
 <body>
@@ -95,12 +85,7 @@
 </header>
 <main>
   <div id="auth-banner" style="display:none"></div>
-  <div class="tabs">
-    <button class="tab active" data-tab="overview" onclick="switchTab('overview')">总览</button>
-    <button class="tab" data-tab="security" onclick="switchTab('security')">安全设置</button>
-  </div>
 
-  <div class="tab-pane active" id="pane-overview">
   <h2>已注册智能体</h2>
   <div id="agents"></div>
 
@@ -117,35 +102,11 @@
       <th style="width:150px">时间</th><th style="width:110px">ID</th></tr></thead>
     <tbody id="files"></tbody>
   </table>
-  </div>
-
-  <div class="tab-pane" id="pane-security">
-  <h2>安全设置（控制面配对）<span style="font-size:11px;color:var(--muted);font-weight:400;">仅主机本机可操作</span></h2>
-  <div style="display:flex;flex-wrap:wrap;gap:16px;margin-bottom:8px;">
-    <div style="flex:1;min-width:280px;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px;">
-      <div style="font-weight:600;margin-bottom:6px;">设定配对密码</div>
-      <div style="font-size:12px;color:var(--muted);margin-bottom:10px;">人工决定的一次性密码（大小写/数字/符号均可，1-64 位）。15 分钟有效、配对成功即作废；密码不落网。把密码告知受控机（智能体提示词或人工在受控机托盘输入）。</div>
-      <input id="pairPass" type="password" placeholder="人类设定的配对密码"
-             style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;box-sizing:border-box;margin-bottom:8px;font-size:13px;">
-      <button onclick="setCode()" style="padding:6px 14px;background:var(--brand);color:#fff;border:none;border-radius:8px;cursor:pointer;">设定配对密码</button>
-      <div id="codeBox" style="display:none;margin-top:10px;font-size:12px;background:#eef0f7;border:1px solid var(--border);border-radius:8px;padding:10px 12px;">
-        已设定：<span id="codeText"></span>
-      </div>
-      <div id="codeErr" style="color:#c53030;font-size:12px;margin-top:8px;min-height:14px;"></div>
-    </div>
-    <div style="flex:1;min-width:280px;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px;">
-      <div style="font-weight:600;margin-bottom:6px;">已配对节点</div>
-      <div id="pairsList" style="font-size:12px;min-height:40px;color:var(--muted);"></div>
-      <button onclick="resetPairs()" style="margin-top:10px;padding:6px 14px;background:#c53030;color:#fff;border:none;border-radius:8px;cursor:pointer;">重置全部配对</button>
-    </div>
-  </div>
-  </div>
 </main>
 <script>
 const fmt = ts => new Date(ts * 1000).toLocaleString("zh-CN", { hour12: false });
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
-// 展开状态：message id 集合（3 秒重渲染后恢复）
 const expanded = new Set();
 
 function summarize(m) {
@@ -156,7 +117,6 @@ function summarize(m) {
   return "-";
 }
 
-// 展开后的完整内容（按消息类型组织关键字段，而非原始 JSON）
 function detailText(m) {
   const p = m._p;
   if (p.type === "task_request") {
@@ -202,15 +162,13 @@ function msgRow(m, child = false, mark = "") {
 }
 
 function renderMessages(msgs) {
-  // 过滤无类型消息（心跳等杂音）
   const valid = [];
   for (const m of msgs) {
     try { m._p = m.payload ? JSON.parse(m.payload) : {}; } catch { m._p = {}; }
     if (m._p.type && m._p.type !== "heartbeat") valid.push(m);
   }
 
-  // 按 correlation_id 把任务请求与结果配对成组
-  const groups = new Map();   // cid -> { req, results, hasResult }
+  const groups = new Map();
   const singles = [];
   for (const m of valid) {
     const isTask = m._p.type === "task_request" || m._p.type === "task_result";
@@ -224,7 +182,6 @@ function renderMessages(msgs) {
     }
   }
 
-  // 组与独立消息统一按最新时间倒序
   const items = [];
   groups.forEach(g => items.push({ kind: "g", ts: g.lastTs, g }));
   for (const m of singles) items.push({ kind: "m", ts: m.ts, m });
@@ -235,35 +192,29 @@ function renderMessages(msgs) {
     if (it.kind === "m") { html += msgRow(it.m); continue; }
     const { req, results } = it.g;
     if (req) {
-      // 主行 = 任务请求；有结果时加"已回传"标记，否则"等待结果"
       const mark = results.length > 0
         ? `<span class="pill done">✓ 已回传</span> `
         : `<span class="pill wait">… 等待结果</span> `;
       html += msgRow(req, false, mark);
-      // 子行 = 结果（缩进）
       for (const r of results) html += msgRow(r, true);
     } else {
-      // 只有结果（请求超出 limit 截断）：结果升为主行
       for (const r of results) html += msgRow(r);
     }
   }
   document.getElementById("messages").innerHTML = html || '<tr><td colspan="5" class="muted">暂无消息</td></tr>';
 }
 
-// 展开/收起（事件委托，重渲染后状态由 expanded 集合恢复）
 document.getElementById("messages").addEventListener("click", e => {
   const btn = e.target.closest(".exp-btn");
   if (!btn) return;
   const id = Number(btn.dataset.id);
   if (expanded.has(id)) expanded.delete(id); else expanded.add(id);
-  // 局部 toggle，不打断整体渲染
   const detail = document.getElementById("detail-" + id);
   if (detail) {
     detail.hidden = !expanded.has(id);
     if (detail.hidden) detail.remove();
   }
   btn.textContent = expanded.has(id) ? "收起 ▴" : "展开 ▾";
-  // 若是展开且详情行不存在（首点），重渲染该表
   if (expanded.has(id) && !document.getElementById("detail-" + id)) refreshMessages();
 });
 
@@ -275,7 +226,6 @@ async function refreshMessages() {
 const OS_LABEL = { windows: "Windows", linux: "Linux", darwin: "macOS", macos: "macOS" };
 const isGui = a => /gui/i.test(a.executor || "");
 
-// 智能体 chip：一行紧凑展示（名称 + TUI/GUI 标 + 执行器），悬浮见全量信息
 function agentChip(a) {
   const exe = a.executor || "sdk";
   const tag = isGui(a) ? `<span class="tag gui">GUI</span>`
@@ -285,18 +235,17 @@ function agentChip(a) {
     title="${esc(a.agent_id)} · ${esc(exe)}${a.online ? "" : " · 离线"}">
     <span class="dot ${a.online ? "" : "off"}"></span>${esc(a.name)}${tag}
     <span class="exe">${esc(exeShort)}</span>
-    <span class="rm" data-rm="${esc(a.agent_id)}" title="移除节点（吊销凭据）">×</span></span>`;
+    <span class="rm" data-rm="${esc(a.agent_id)}" title="移除节点">×</span></span>`;
 }
 
-// 移除节点（事件委托）
 document.getElementById("agents").addEventListener("click", e => {
   const rm = e.target.closest(".rm");
   if (!rm) return;
   const id = rm.dataset.rm;
-  if (!confirm(`移除节点 ${id}？将吊销其 MQTT 密码与 HTTP 令牌。`)) return;
+  if (!confirm(`移除节点 ${id}？`)) return;
   busFetch("/api/admin/nodes/" + encodeURIComponent(id), { method: "DELETE" })
     .then(async r => {
-      if (r.status === 403) { alert("需要管理员令牌（当前令牌 role=node）"); return; }
+      if (r.status === 403) { alert("需要管理员令牌"); return; }
       if (!r.ok) { alert("移除失败: " + (await r.text())); return; }
       const j = await r.json();
       if (!j.broker_restarted) alert("已移除。注意: " + j.broker_message);
@@ -304,7 +253,6 @@ document.getElementById("agents").addEventListener("click", e => {
     });
 });
 
-// 首次向导
 async function doSetup() {
   const name = document.getElementById("wizTeamName").value.trim();
   const err = document.getElementById("wizErr");
@@ -324,7 +272,6 @@ async function doSetup() {
 let teamNameCache = "";
 
 function renderAgents(agents) {
-  // 按 hostname 分组（空则归 "_unknown"），组内 chip 横向流式排布
   const hostMap = new Map();
   for (const a of agents) {
     const host = a.hostname || "_unknown";
@@ -356,55 +303,6 @@ function busFetch(url, opts) {
   return fetch(url, opts);
 }
 
-// ---- Tab 切换（总览 / 安全设置） ----
-function switchTab(name) {
-  document.querySelectorAll(".tab").forEach(t =>
-    t.classList.toggle("active", t.dataset.tab === name));
-  document.querySelectorAll(".tab-pane").forEach(p =>
-    p.classList.toggle("active", p.id === "pane-" + name));
-}
-
-// ---- 安全设置：控制面配对（人工设定密码 / 已配对节点 / 重置） ----
-
-async function setCode() {
-  const pw = document.getElementById("pairPass").value;
-  const err = document.getElementById("codeErr");
-  err.textContent = "";
-  if (!pw) { err.textContent = "请输入配对密码"; return; }
-  try {
-    const r = await fetch("/api/control/setcode", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ passphrase: pw }),
-    });
-    if (!r.ok) { err.textContent = (await r.json()).detail || "设定失败（仅主机本机可操作）"; return; }
-    const j = await r.json();
-    document.getElementById("codeText").textContent =
-      "有效期至 " + fmt(j.expires_at) + "（一次性，配对成功即作废）";
-    document.getElementById("codeBox").style.display = "block";
-    document.getElementById("pairPass").value = "";
-  } catch (e) { err.textContent = "网络错误"; }
-}
-
-async function loadPairs() {
-  const el = document.getElementById("pairsList");
-  try {
-    const r = await fetch("/api/control/pairs");
-    if (!r.ok) { el.innerHTML = "仅主机本机可查看"; return; }
-    const rows = await r.json();
-    el.innerHTML = rows.length
-      ? rows.map(p => `<div style="margin:2px 0;">${esc(p.agent_id)} <span style="color:var(--muted)">· ${fmt(p.paired_at)}</span></div>`).join("")
-      : "暂无配对节点";
-  } catch (e) { el.innerHTML = "不可用"; }
-}
-
-function resetPairs() {
-  if (!confirm("重置全部配对？所有受控机的 shell 控制将立即失效，需重新生成安装码配对。")) return;
-  fetch("/api/control/reset", { method: "POST" })
-    .then(r => r.json())
-    .then(j => { alert(j.ok ? "已重置全部配对" : "重置失败"); loadPairs(); })
-    .catch(() => alert("网络错误"));
-}
-
 async function load() {
   try {
     const [agents, msgs, files] = await Promise.all([
@@ -417,7 +315,6 @@ async function load() {
     document.getElementById("status").textContent =
       `${agents.filter(a => a.online).length}/${agents.length} 在线 · ${msgs.length} 条消息 · ${files.length} 个文件`;
 
-    // 队伍徽标
     const badge = document.getElementById("teamBadge");
     if (teamNameCache) {
       badge.textContent = "队伍 · " + teamNameCache;
@@ -425,22 +322,18 @@ async function load() {
     }
 
     renderAgents(agents);
-
     renderMessages(msgs);
 
     document.getElementById("files").innerHTML = files.map(f => `
       <tr><td><a href="${esc(f.url)}" target="_blank">${esc(f.name)}</a></td><td class="muted">${(f.size / 1024).toFixed(1)} KB</td>
       <td>${esc(f.uploaded_by || "-")}</td><td class="muted">${fmt(f.ts)}</td>
       <td class="muted">${esc(f.file_id)}</td></tr>`).join("") || '<tr><td colspan="5" class="muted">暂无文件</td></tr>';
-
-    loadPairs();  // 安全设置：已配对节点（3 秒轮询随 load 刷新）
   } catch (e) {
     document.getElementById("conn").classList.add("off");
     document.getElementById("status").textContent = "服务不可达";
   }
 }
 
-// 启动：先查队伍状态——未初始化显示首次向导，已初始化走正常加载（未登录则弹登录）
 async function boot() {
   try {
     const r = await fetch("/api/team/status");
@@ -451,7 +344,7 @@ async function boot() {
       return;
     }
     teamNameCache = t.team_name;
-  } catch (e) { /* 状态查询失败则继续走正常加载（兼容旧版服务端） */ }
+  } catch (e) { /* 状态查询失败则继续走正常加载 */ }
   bootAfterWizard();
 }
 

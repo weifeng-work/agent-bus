@@ -9,8 +9,6 @@
                               [--db data/bus.db] [--files-dir data/files]
 """
 import argparse
-import base64
-import hashlib
 import json
 import logging
 import os
@@ -32,7 +30,6 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from agent_bus import provision
-from agent_bus import crypto
 from agent_bus.discovery import BeaconBroadcaster, PROTO, PROTO_VER
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -85,13 +82,9 @@ class Store:
                     team_id TEXT, team_name TEXT,
                     created_at REAL, updated_at REAL
                 );
-                CREATE TABLE IF NOT EXISTS control_pairs(
-                    agent_id TEXT PRIMARY KEY,
-                    key_b64 TEXT, code_hash TEXT, paired_at REAL
-                );
                 """
             )
-            # 增量迁移：逐列补齐（列已存在时忽略；必须分开 try，否则前一列失败会跳过后一列）
+            # 增量迁移：逐列补齐（列已存在时忽略）
             for col in ("hostname", "health"):
                 try:
                     self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
@@ -122,7 +115,6 @@ class Store:
         )
 
     def heartbeat(self, agent_id: str, health: str = None):
-        # 心跳携带 health 时同步刷新（执行器登录态变化的推送通道）
         self.execute(
             "UPDATE agents SET online=1, last_seen=?, "
             "health=COALESCE(NULLIF(?,''), health) WHERE agent_id=?",
@@ -152,11 +144,9 @@ class Store:
     # ---- messages ----
 
     def log_message(self, topic: str, msg: dict):
-        # 心跳不进时间线：在线状态由 agents 表管理，入库只会刷屏
         if topic.startswith("bus/heartbeat/"):
             return
         target_id = msg.get("target_id", "")
-        # task_result 兜底：旧版客户端不带 target_id，按 correlation_id 查原请求发起方
         if msg.get("type") == "task_result" and not target_id and msg.get("correlation_id"):
             rows = self.execute(
                 "SELECT sender_id FROM messages WHERE correlation_id=? AND msg_type='task_request' LIMIT 1",
@@ -221,22 +211,6 @@ class Store:
     def delete_agent(self, agent_id: str):
         self.execute("DELETE FROM agents WHERE agent_id=?", (agent_id,))
 
-    # ---- 控制面配对（M3） ----
-
-    def save_pair(self, agent_id: str, key_b64: str, code_hash: str):
-        self.execute(
-            "INSERT OR REPLACE INTO control_pairs(agent_id,key_b64,code_hash,paired_at)"
-            " VALUES(?,?,?,?)",
-            (agent_id, key_b64, code_hash, time.time()),
-        )
-
-    def list_pairs(self):
-        rows = self.execute("SELECT agent_id,key_b64 FROM control_pairs", fetch=True)
-        return [dict(r) for r in rows]
-
-    def clear_pairs(self):
-        self.execute("DELETE FROM control_pairs")
-
 
 # ---------------------------------------------------------------------------
 # MQTT 桥
@@ -278,7 +252,7 @@ class MqttBridge:
         except (ValueError, UnicodeDecodeError):
             return
         topic = msg.topic
-        self.store.log_message(topic, data)  # 全量追溯
+        self.store.log_message(topic, data)
         t = data.get("type")
         if t == "register":
             self.store.upsert_agent(data)
@@ -288,24 +262,6 @@ class MqttBridge:
         elif topic.startswith("bus/offline/"):
             self.store.mark_offline(data.get("agent_id", ""))
             log.info("离线(遗嘱): %s", data.get("agent_id"))
-
-
-# ---------------------------------------------------------------------------
-# 控制面配对（M3，架构 §6.1）：人工设定一次性密码 + 本地派生密钥
-# ---------------------------------------------------------------------------
-
-PAIR_CODE_TTL = 900.0                                # 15 分钟
-_pending_codes = {}  # 密码哈希 -> {"key_b64", "expires_at"}（进程内，重启即失效）
-
-
-def _write_control_keys(store: Store):
-    """把已配对 worker 的 K 写出 runtime/control_keys.json（hub 同机读取，架构 §6.1）。"""
-    pairs = store.list_pairs()
-    data = {p["agent_id"]: p["key_b64"] for p in pairs}
-    runtime = ROOT_DIR / "data" / "runtime"
-    runtime.mkdir(parents=True, exist_ok=True)
-    (runtime / "control_keys.json").write_text(
-        json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -320,19 +276,17 @@ def create_app(store: Store, files_dir: Path, bridge: MqttBridge,
     from fastapi import Depends, Header
 
     def require_token(authorization: str = Header(None), token: str = Query(None)):
-        """面板 API（匿名放行）：无需凭据。保留签名以便将来收紧。"""
+        """面板 API（匿名放行）：无需凭据。"""
         return {"agent_id": "", "role": "anonymous"}
 
     def require_admin(ident: dict = Depends(require_token)):
-        """管理操作（节点移除）：面板全匿名，放行."""
         return ident
 
     @app.get("/api/health")
     def health():
-        # 开放端点（发现/连通性探测用），不泄露任何业务信息
         return {"ok": True}
 
-    # ---- 队伍：首次向导 + 加入（匿名直连，无凭据） ----
+    # ---- 队伍：首次向导 + 加入 ----
 
     class SetupBody(BaseModel):
         team_name: str
@@ -344,14 +298,11 @@ def create_app(store: Store, files_dir: Path, bridge: MqttBridge,
 
     @app.get("/api/team/status")
     def team_status():
-        """匿名：面板据此决定显示首次向导。"""
         t = store.get_team()
         return {"initialized": bool(t), "team_name": t["team_name"] if t else ""}
 
     @app.post("/api/team/setup")
     def team_setup(body: SetupBody):
-        """匿名但仅可用一次：队伍未初始化时允许设定队名（首启向导）。
-        已初始化后永久 403。"""
         if store.get_team():
             raise HTTPException(403, "team already initialized")
         team_name = body.team_name.strip()
@@ -363,10 +314,6 @@ def create_app(store: Store, files_dir: Path, bridge: MqttBridge,
 
     @app.post("/api/join")
     def join(body: JoinBody, request: Request):
-        """子设备加入队伍（匿名）：仅登记入队意图，返回 broker 连接信息。
-
-        无口令/凭据——broker 已 allow_anonymous true，节点凭 agent_id 直接连。
-        """
         team = store.get_team()
         if not team:
             raise HTTPException(403, "team not initialized")
@@ -385,85 +332,11 @@ def create_app(store: Store, files_dir: Path, bridge: MqttBridge,
 
     @app.delete("/api/admin/nodes/{agent_id}")
     def remove_node(agent_id: str, ident: dict = Depends(require_admin)):
-        """移除节点：仅从名单摘除（匿名 broker 无凭据可吊销）。"""
         store.delete_agent(agent_id)
         log.info("节点已移除: %s by %s", agent_id, ident.get("agent_id"))
         return {"ok": True, "agent_id": agent_id}
 
-    # ---- 控制面配对（M3）：人工设定密码 + proof 校验 ----
-
-    def local_only(request: Request):
-        if not request.client or request.client.host not in ("127.0.0.1", "::1"):
-            raise HTTPException(403, "仅主机本机可执行此操作")
-
-    class PairBody(BaseModel):
-        agent_id: str = ""
-        device_name: str = ""
-        code_hash: str = ""   # worker 本地算的密码哈希（定位，不含密码/K）
-        proof: str = ""       # HMAC(K, "pairing")，K 由密码本地派生
-
-    class SetCodeBody(BaseModel):
-        passphrase: str = ""
-
-    @app.post("/api/control/setcode")
-    def set_pair_code(body: SetCodeBody, request: Request):
-        """人工设定配对密码（仅本机）：一次性、15 分钟有效、配对成功即作废。
-
-        密码由主控人类决定（大小写/数字/符号均可，1-64 位），只在面板输入
-        瞬间本地派生 K=HKDF(密码)，密码本身不落网、不落盘。
-        """
-        local_only(request)
-        pw = body.passphrase
-        if not (1 <= len(pw) <= 64):
-            raise HTTPException(400, "配对密码长度需 1-64")
-        key = crypto.derive_pair_key(pw)
-        pw_hash = hashlib.sha256(pw.encode("utf-8")).hexdigest()
-        _pending_codes[pw_hash] = {
-            "key_b64": base64.b64encode(key).decode("ascii"),
-            "expires_at": time.time() + PAIR_CODE_TTL,
-        }
-        log.info("配对密码已设定（15 分钟有效，一次性）")
-        return {"ok": True, "expires_at": time.time() + PAIR_CODE_TTL}
-
-    @app.post("/api/pair")
-    def pair(body: PairBody):
-        """worker 配对：按密码哈希定位 → proof 校验 → 登记 K（hub 同机读取）。"""
-        agent_id = (body.agent_id or "").strip()
-        if not provision.valid_agent_id(agent_id):
-            raise HTTPException(400, "agent_id 非法（限 [A-Za-z0-9_-]，1-64 位）")
-        pend = _pending_codes.get((body.code_hash or "").strip())
-        if not pend or pend["expires_at"] < time.time():
-            raise HTTPException(401, "配对密码无效或已过期")
-        key = base64.b64decode(pend["key_b64"])
-        claim = {"agent_id": agent_id, "device_name": body.device_name,
-                 "code_hash": body.code_hash}
-        if not crypto.hmac_verify(key, claim, body.proof):
-            raise HTTPException(401, "配对校验失败")
-        del _pending_codes[body.code_hash]  # 一次性：配对成功即作废
-        store.save_pair(agent_id, pend["key_b64"], body.code_hash)
-        _write_control_keys(store)
-        team = store.get_team()
-        log.info("控制配对成功: %s (%s)", agent_id, body.device_name)
-        return {"ok": True, "team_name": team["team_name"] if team else ""}
-
-    @app.post("/api/control/reset")
-    def control_reset(request: Request):
-        """重置全部配对（仅本机）：所有 worker 控制失效，需重新配对。"""
-        local_only(request)
-        _pending_codes.clear()
-        store.clear_pairs()
-        _write_control_keys(store)
-        log.info("控制配对已全部重置")
-        return {"ok": True}
-
-    @app.get("/api/control/pairs")
-    def control_pairs(request: Request):
-        """已配对节点列表（仅本机，面板安全设置用）。"""
-        local_only(request)
-        rows = store.execute(
-            "SELECT agent_id, paired_at FROM control_pairs ORDER BY paired_at",
-            fetch=True)
-        return [dict(r) for r in rows]
+    # ---- 节点列表 ----
 
     @app.get("/api/agents")
     def agents(ident: dict = Depends(require_token)):
@@ -498,61 +371,51 @@ def create_app(store: Store, files_dir: Path, bridge: MqttBridge,
         base = os.environ.get("BUS_HTTP_BASE", "").rstrip("/")
         url = f"{base}/api/files/{file_id}" if base else f"/api/files/{file_id}"
         log.info("文件上传: %s (%d bytes) by %s", file.filename, size, uploaded_by)
-        return {"file_id": file_id, "name": file.filename, "size": size, "url": url}
+        return {"file_id": file_id, "url": url, "size": size}
 
     @app.get("/api/files/{file_id}")
     def download(file_id: str, ident: dict = Depends(require_token)):
         meta = store.get_file(file_id)
         if not meta:
             raise HTTPException(404, "file not found")
-        path = files_dir / f"{file_id}_{meta['name']}"
-        if not path.exists():
-            raise HTTPException(410, "file data missing")
-        return FileResponse(path, filename=meta["name"])
+        for f in files_dir.iterdir():
+            if f.name.startswith(file_id):
+                return FileResponse(str(f), filename=meta["name"],
+                                    media_type="application/octet-stream")
+        raise HTTPException(404, "file not found on disk")
 
-    @app.on_event("shutdown")
-    def shutdown():
-        bridge.stop()
+    # ---- 静态 ----
 
-    app.mount("/", StaticFiles(directory=str(BASE_DIR / "static"), html=True), name="static")
+    static_dir = BASE_DIR / "static"
+    if static_dir.is_dir():
+        app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
+
     return app
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Agent Bus 中间架构服务端")
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--broker-host", default=os.environ.get("BUS_BROKER_HOST", "127.0.0.1"))
-    parser.add_argument("--broker-port", type=int, default=int(os.environ.get("BUS_BROKER_PORT", "1883")))
-    parser.add_argument("--db", default=str(ROOT_DIR / "data" / "bus.db"))
-    parser.add_argument("--files-dir", default=str(ROOT_DIR / "data" / "files"))
-    parser.add_argument("--mqtt-user", default=os.environ.get("BUS_MQTT_USER", ""))
-    parser.add_argument("--mqtt-pass", default=os.environ.get("BUS_MQTT_PASS", ""))
-    args = parser.parse_args()
+# ---------------------------------------------------------------------------
+# 入口
+# ---------------------------------------------------------------------------
 
-    # 面板/消息里展示的绝对 URL 基址（默认用本机回环，局域网部署时设置环境变量）
-    if not os.environ.get("BUS_HTTP_BASE"):
-        os.environ["BUS_HTTP_BASE"] = f"http://127.0.0.1:{args.port}"
+
+def main():
+    ap = argparse.ArgumentParser(description="Agent Bus 中间架构服务端")
+    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--port", type=int, default=8000)
+    ap.add_argument("--broker-host", default="127.0.0.1")
+    ap.add_argument("--broker-port", type=int, default=1883)
+    ap.add_argument("--db", default=str(ROOT_DIR / "data" / "bus.db"))
+    ap.add_argument("--files-dir", default=str(ROOT_DIR / "data" / "files"))
+    args = ap.parse_args()
 
     store = Store(Path(args.db))
-    bridge = MqttBridge(store, args.broker_host, args.broker_port,
-                        username=args.mqtt_user, password=args.mqtt_pass)
+    bridge = MqttBridge(store, args.broker_host, args.broker_port)
     bridge.start()
     app = create_app(store, Path(args.files_dir), bridge, broker_port=args.broker_port)
 
-    # 队伍发现广播：未初始化时 get_beacon 返回 None，不广播
-    def _beacon():
-        t = store.get_team()
-        if not t:
-            return None
-        return {"proto": PROTO, "ver": PROTO_VER, "team_id": t["team_id"],
-                "team_name": t["team_name"], "host_name": _platform.node(),
-                "ips": provision.get_local_ips(),  # 多网卡/代理 TUN 场景全量自报
-                "mqtt_port": args.broker_port, "http_port": args.port}
-
-    BeaconBroadcaster(_beacon).start()
-    log.info("Agent Bus Server 启动: http://%s:%d (面板在 /)", args.host, args.port)
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    log.info("中间架构服务端启动 %s:%s (broker=%s:%s)",
+             args.host, args.port, args.broker_host, args.broker_port)
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 
 if __name__ == "__main__":

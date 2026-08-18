@@ -6,16 +6,23 @@
   BUS_BROKER_PORT    MQTT 端口（默认 1883）
   BUS_HTTP_BASE      HTTP 基址（默认 http://127.0.0.1:8000）
 
-接入（以 CodeBuddy / Claude Code 类客户端为例，写入其 MCP 配置）:
+MCP 配置模板（给每个智能体客户端写入，替换 <安装目录> 和 <智能体ID>）:
   {
     "mcpServers": {
       "agent-bus": {
         "command": "python",
-        "args": ["<绝对路径>/skill/mcp_server.py"],
-        "env": { "BUS_AGENT_ID": "my_agent", "BUS_HTTP_BASE": "http://<服务器IP>:8000" }
+        "args": ["<安装目录>/skill/mcp_server.py"],
+        "env": {
+          "BUS_AGENT_ID": "<智能体ID>"
+        }
       }
     }
   }
+
+说明:
+  - 主控机 IP 和端口不用填，mcp_server.py 会自动读取安装时生成的 bus.env
+  - 安装目录默认 %LOCALAPPDATA%\agent-bus（Windows）或 ~/.local/share/agent-bus（Linux）
+  - <智能体ID> 取一个唯一标识，如 "agent_电脑名"
 """
 import json
 import sys

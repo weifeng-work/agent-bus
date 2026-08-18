@@ -1,33 +1,33 @@
-﻿# Agent Bus 通信节点（托盘壳）安装 —— 计划任务注册 + 启动（需求1 三层自愈）
+# Agent Bus 通信节点（服务化 + 托盘）安装 —— Phase 4（NSSM 服务 + 开始菜单快捷方式）
 #
 # 做什么:
 #   1. 读取设备身份（~/.config/agent-bus/device.json，join_team 写入）
-#   2. 生成 start_tray.bat（以用户会话启动 comm_node.py）
-#   3. 删除旧版直启执行器任务 AgentBus<Executor>（升级兼容）
-#   4. 注册计划任务（pythonw 直启 + 隐藏，无黑窗）:
-#        AgentBusShell          /sc onlogon      → pythonw executor\comm_node.py（登录即起）
-#        AgentBusShellWatchdog  /sc minute /mo 1 → pythonw scripts\watchdog.py（分钟级兜底）
-#   5. 立即启动托盘壳
+#   2. 生成 start_tray.bat + 开始菜单快捷方式（恢复托盘用）
+#   3. 删除旧版直启任务（升级兼容）
+#   4. 注册 NSSM 服务 AgentBusCore（core_node 后台服务，自动启动 + 崩溃重启）
+#   5. 清理旧版计划任务 AgentBusShell / AgentBusShellWatchdog
+#   6. 创建开始菜单快捷方式（替代计划任务拉起托盘）
+#   7. 启动服务 + 托盘 UI
 #
 # 用法:
 #   powershell -ExecutionPolicy Bypass -File scripts\setup_tray.ps1 `
-#     -InstallDir C:\agent-bus -Executor codebuddy
+#     -InstallDir <dir> -Executor codebuddy -AgentId host-xxxx
 #
-# 参数（M3 起生效）:
-#   -PairCode           主控面板生成的一次性安装码（配对数）
+# 参数:
+#   -Queue              队列标识（可选，用于区分不同队伍）
 #   -EnableShellControl 安装后即开启 shell 受控能力（默认关）
 param(
-    [string]$InstallDir = "C:\agent-bus",
+    [string]$InstallDir = "$env:LOCALAPPDATA\agent-bus",
     [string]$Executor = "codebuddy",
     [string]$AgentId = "",
     [string]$Name = "",
-    [string]$PairCode = "",
+    [string]$Queue = "",
     [switch]$EnableShellControl
 )
 
 $ErrorActionPreference = "Stop"
 
-# ---------- 0. Python 检测（与 setup_worker_windows.ps1 一致） ----------
+# ---------- 0. Python 检测 ----------
 $py = $null
 foreach ($c in @("python", "py")) {
     $cmd = Get-Command $c -ErrorAction SilentlyContinue
@@ -36,9 +36,9 @@ foreach ($c in @("python", "py")) {
         try { & cmd /c "$test --version" 2>$null | Out-Null; if ($LASTEXITCODE -eq 0) { $py = $test; break } } catch {}
     }
 }
-if (-not $py) { throw "未找到 Python 3.10+，请先安装（可运行 setup_worker_windows.ps1 自动安装）" }
+if (-not $py) { throw "未找到 Python 3.10+，请先安装" }
 
-# ---------- 0.2 解析 pythonw（无控制台窗口，避免受控机弹黑窗） ----------
+# ---------- 0.2 解析 pythonw ----------
 function Resolve-PythonW {
     $c = Get-Command pythonw -ErrorAction SilentlyContinue
     if ($c) { return $c.Source }
@@ -49,7 +49,8 @@ function Resolve-PythonW {
 }
 $pyw = Resolve-PythonW
 
-# ---------- 0.5 安装目录权限自适应（与 setup_worker 一致） ----------
+# ---------- 0.5 安装目录权限检查（D6：默认 %LOCALAPPDATA%\agent-bus） ----------
+# %LOCALAPPDATA% 是用户目录，用户与 SYSTEM 服务均可读写，无需 ACL 调整
 function Test-DirWritable([string]$dir) {
     try {
         $parent = if (Test-Path $dir) { $dir } else { Split-Path $dir -Parent }
@@ -60,12 +61,7 @@ function Test-DirWritable([string]$dir) {
     } catch { return $false }
 }
 if (-not (Test-DirWritable $InstallDir)) {
-    if ($InstallDir -eq "C:\agent-bus") {
-        $InstallDir = "$env:LOCALAPPDATA\agent-bus"
-        Write-Host "  C:\agent-bus 不可写（普通权限），自动改用: $InstallDir" -ForegroundColor Yellow
-    } else {
-        throw "安装目录不可写: $InstallDir（请改用用户可写目录，如 %LOCALAPPDATA%\agent-bus）"
-    }
+    throw "安装目录不可写: $InstallDir（请指定一个用户可写的目录）"
 }
 
 # ---------- 1. 设备身份 ----------
@@ -75,105 +71,145 @@ if (-not $AgentId -and (Test-Path $devJson)) {
 }
 if (-not $AgentId) { throw "未找到 agent_id：请先运行 join_team.py 入队，或传 -AgentId" }
 if (-not $Name) { $Name = "Node@$env:COMPUTERNAME" }
-
-Write-Host "== Agent Bus 通信节点安装 ==" -ForegroundColor Cyan
-Write-Host "  agent_id : $AgentId"
-Write-Host "  executor : $Executor"
-
-# ---------- 2. 启动参数（单一来源：任务 / 批处理 / launch json 共用） ----------
-$logFile = "$InstallDir\data\tray_shell.log"
-# 节点身份与执行器身份分离（架构 §3）：node-<agent> 收控制消息，执行器用原 agent_id
 $nodeId = "node-$AgentId"
-$shellArgs = @(
+
+Write-Host "== Agent Bus 通信节点安装（服务化模式）==" -ForegroundColor Cyan
+Write-Host "  agent_id : $AgentId"
+Write-Host "  node_id  : $nodeId"
+Write-Host "  executor : $Executor"
+if ($Queue) { Write-Host "  queue    : $Queue" }
+
+# ---------- 2. 生成托盘 UI 启动参数 ----------
+$trayLogFile = "$InstallDir\data\tray_shell.log"
+$trayArgs = @(
+    "executor\tray_app.py",
+    "--install-dir", $InstallDir,
     "--role", "worker",
-    "--agent-id", $nodeId,
-    "--executor-agent-id", $AgentId,
-    "--name", $Name,
-    "--executor", $Executor,
-    "--install-dir", $InstallDir
+    "--agent-id", $nodeId
 )
-if ($EnableShellControl) { $shellArgs += "--enable-shell-control" }
-# 含空格参数加引号
-$shellArgsStr = ($shellArgs | ForEach-Object {
+$trayArgsStr = ($trayArgs | ForEach-Object {
     if ($_ -match '\s') { "`"$_`"" } else { $_ }
 }) -join " "
 
-# start_tray.bat（仅手动双击用，已改用 pythonw，不弹黑窗）
+# start_tray.bat（手动双击恢复托盘用）
 $bat = @"
 @echo off
 cd /d $InstallDir
-start "" pythonw.exe executor\comm_node.py $shellArgsStr > "$logFile" 2>&1
+start "" pythonw.exe $trayArgsStr > "$trayLogFile" 2>&1
 "@
 Set-Content -Path "$InstallDir\start_tray.bat" -Value $bat -Encoding ASCII
-Write-Host "  已生成: $InstallDir\start_tray.bat（节点身份 $nodeId，pythonw 无窗口）"
+Write-Host "  已生成: $InstallDir\start_tray.bat（托盘 UI 恢复入口）"
 
-# shell_launch.json：供 watchdog / 远程更新无窗口重启（pythonw 直启，不经过 .bat/cmd）
-$runtimeDir = "$InstallDir\data\runtime"
-if (-not (Test-Path $runtimeDir)) { New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null }
-$launchSpec = [ordered]@{
-    exe  = $pyw
-    args = $shellArgs
-    cwd  = $InstallDir
-} | ConvertTo-Json -Compress
-Set-Content -Path "$runtimeDir\shell_launch.json" -Value $launchSpec -Encoding UTF8
-Write-Host "  已生成: $runtimeDir\shell_launch.json（watchdog 无窗口重启用）"
-
-# ---------- 2.5 一次性配对（若给了 -PairCode；成功后密码即作废，不落盘不残留） ----------
-if ($PairCode) {
-    Write-Host "  配对中（一次性密码）..."
-    & cmd /c "cd /d $InstallDir && $pyw executor\comm_node.py --role worker --agent-id $nodeId --headless --no-bus --pair-code `"$PairCode`" --test-seconds 1"
-    $ctrlFile = "$env:USERPROFILE\.config\agent-bus\control.json"
-    $paired = $false
-    if (Test-Path $ctrlFile) {
-        try { $paired = ((Get-Content $ctrlFile -Raw | ConvertFrom-Json).agent_id -eq $nodeId) } catch {}
-    }
-    if ($paired) {
-        Write-Host "  配对成功 ✓（控制面已激活，密码已作废）" -ForegroundColor Green
-    } else {
-        Write-Host "  配对未完成（密码无效/过期？）：节点照常运行，装完可在托盘『输入配对码』补配对" -ForegroundColor Yellow
-    }
-}
-
-# ---------- 3. 删除旧版直启任务（升级兼容，幂等） ----------
-# 用 PowerShell 原生 API 删除，避免 schtasks 在任务不存在时把 stderr 当终止错误中断脚本
+# ---------- 3. 旧版清理 ----------
+# 3a. 清理旧版直启执行器任务
 $oldTask = Get-ScheduledTask -TaskName "AgentBus$Executor" -ErrorAction SilentlyContinue
 if ($oldTask) {
     Unregister-ScheduledTask -TaskName "AgentBus$Executor" -Confirm:$false -ErrorAction SilentlyContinue
 }
 
-# ---------- 4. 注册计划任务（pythonw 直启 + 隐藏，杜绝黑窗） ----------
-# 用 PowerShell 原生 Register-ScheduledTask 注册：
-#   - 不受 schtasks /tr 261 字符上限限制（长 java/pythonw 路径+参数也能注册）
-#   - Settings.Hidden = $true，任务计划程序里不弹窗
-# 用工件命令直接注册，不经过 .bat / cmd，避免任何控制台窗口。
-$shellAction = New-ScheduledTaskAction -Execute $pyw -Argument $shellArgsStr -WorkingDirectory $InstallDir
-$shellTrigger = New-ScheduledTaskTrigger -AtLogOn
-$shellSettings = New-ScheduledTaskSettingsSet -Hidden `
+# 3b. 清理旧版计划任务 AgentBusShell / AgentBusShellWatchdog（D5）
+$oldTasks = @("AgentBusShell", "AgentBusShellWatchdog")
+foreach ($tn in $oldTasks) {
+    $t = Get-ScheduledTask -TaskName $tn -ErrorAction SilentlyContinue
+    if ($t) {
+        Write-Host "  清理旧计划任务: $tn" -ForegroundColor Yellow
+        Unregister-ScheduledTask -TaskName $tn -Confirm:$false -ErrorAction SilentlyContinue
+    }
+}
+
+# ---------- 4. 注册 NSSM 服务 AgentBusCore ----------
+Write-Host "  [4/6] 注册 NSSM 服务 AgentBusCore..." -ForegroundColor Cyan
+$nssm = "$InstallDir\scripts\_dl\nssm.exe"
+if (-not (Test-Path $nssm)) {
+    throw "NSSM 未找到: $nssm（请确保项目完整，或重新下载）"
+}
+
+# 构建 agent_service.py 参数（作为服务入口）
+$serviceArgs = @(
+    "$InstallDir\scripts\agent_service.py",
+    "--role", "worker",
+    "--agent-id", $nodeId,
+    "--install-dir", $InstallDir,
+    "--executor", $Executor,
+    "--executor-agent-id", $AgentId
+)
+if ($Queue) { $serviceArgs += "--queue"; $serviceArgs += $Queue }
+if ($EnableShellControl) { $serviceArgs += "--enable-shell-control" }
+$serviceArgsStr = ($serviceArgs | ForEach-Object {
+    if ($_ -match '\s') { "`"$_`"" } else { $_ }
+}) -join " "
+
+# 先确保旧服务已移除
+& $nssm stop AgentBusCore confirm 2>$null | Out-Null
+& $nssm remove AgentBusCore confirm 2>$null | Out-Null
+Start-Sleep 1
+
+# 安装服务
+& $nssm install AgentBusCore $py $serviceArgsStr 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "NSSM 安装服务失败（需要管理员权限）" }
+
+# 配置 NSSM 参数
+& $nssm set AgentBusCore AppDirectory $InstallDir 2>&1 | Out-Null
+& $nssm set AgentBusCore Start SERVICE_AUTO_START 2>&1 | Out-Null
+& $nssm set AgentBusCore AppExit Default Restart 2>&1 | Out-Null
+& $nssm set AgentBusCore AppRestartDelay 5000 2>&1 | Out-Null
+& $nssm set AgentBusCore AppStdout "$InstallDir\data\service.log" 2>&1 | Out-Null
+& $nssm set AgentBusCore AppStderr "$InstallDir\data\service.err.log" 2>&1 | Out-Null
+Write-Host "  服务 AgentBusCore 已注册（自动启动，崩溃 5s 后重启）"
+
+# ---------- 5. 创建开始菜单快捷方式（代替计划任务拉起托盘） ----------
+Write-Host "  [5/6] 创建开始菜单快捷方式..." -ForegroundColor Cyan
+$startMenuDir = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Agent Bus"
+if (-not (Test-Path $startMenuDir)) { New-Item -ItemType Directory -Path $startMenuDir -Force | Out-Null }
+$shortcutPath = "$startMenuDir\Agent Bus Tray.lnk"
+$wshell = New-Object -ComObject WScript.Shell
+$shortcut = $wshell.CreateShortcut($shortcutPath)
+$shortcut.TargetPath = $pyw
+$shortcut.Arguments = $trayArgsStr
+$shortcut.WorkingDirectory = $InstallDir
+$shortcut.Description = "Agent Bus 托盘 UI - 受控节点状态面板"
+$shortcut.Save()
+Write-Host "  开始菜单快捷方式: $shortcutPath"
+
+# 也注册计划任务（onlogon 自动启动托盘，作为备用拉起方式）
+$trayAction = New-ScheduledTaskAction -Execute $pyw -Argument $trayArgsStr -WorkingDirectory $InstallDir
+$trayTrigger = New-ScheduledTaskTrigger -AtLogOn
+$traySettings = New-ScheduledTaskSettingsSet -Hidden `
     -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-    -ExecutionTimeLimit (New-TimeSpan -Hours 0)   # 托盘壳常驻，不限执行时长
-Register-ScheduledTask -TaskName "AgentBusShell" `
-    -Action $shellAction -Trigger $shellTrigger -Settings $shellSettings -Force | Out-Null
+    -ExecutionTimeLimit (New-TimeSpan -Hours 0)
+Register-ScheduledTask -TaskName "AgentBusTray" `
+    -Action $trayAction -Trigger $trayTrigger -Settings $traySettings -Force | Out-Null
+Write-Host "  计划任务: AgentBusTray(onlogon, 隐藏，备用)"
 
-$wdAction = New-ScheduledTaskAction -Execute $pyw `
-    -Argument "scripts\watchdog.py --install-dir `"$InstallDir`"" -WorkingDirectory $InstallDir
-$wdTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
-    -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration ([TimeSpan]::MaxValue)
-$wdSettings = New-ScheduledTaskSettingsSet -Hidden `
-    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-Register-ScheduledTask -TaskName "AgentBusShellWatchdog" `
-    -Action $wdAction -Trigger $wdTrigger -Settings $wdSettings -Force | Out-Null
-Write-Host "  计划任务: AgentBusShell(onlogon, 隐藏) + AgentBusShellWatchdog(每分钟, 隐藏)"
+# 写入 state.json 初始状态（active）
+$runtimeDir = "$InstallDir\data\runtime"
+if (-not (Test-Path $runtimeDir)) { New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null }
+$stateInit = '{"state": "active", "updated_at": ' + (Get-Date -UFormat %s) + '}'
+Set-Content -Path "$runtimeDir\state.json" -Value $stateInit -Encoding UTF8
+Write-Host "  状态机: state.json -> active"
 
-# ---------- 5. 启动托盘壳（pythonw 直启，隐藏窗口） ----------
-# 幂等：先清理本机已有节点进程，避免重复实例（重装/升级场景）
+# ---------- 6. 启动服务 + 托盘 ----------
+Write-Host "  [6/6] 启动服务与托盘..." -ForegroundColor Cyan
+
+# 启动 NSSM 服务
+& $nssm start AgentBusCore 2>&1 | Out-Null
+Start-Sleep 2
+
+# 启动托盘 UI（用户会话）
+# 先清理旧版托盘进程
 Get-CimInstance Win32_Process |
-  Where-Object { $_.CommandLine -match 'comm_node|_executor\.py' } |
+  Where-Object { $_.CommandLine -match 'tray_app|comm_node|_executor\.py' } |
   ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 Start-Sleep 1
-Start-Process -FilePath $pyw -ArgumentList $shellArgs -WindowStyle Hidden -WorkingDirectory $InstallDir
+Start-Process -FilePath $pyw -ArgumentList $trayArgs -WindowStyle Hidden -WorkingDirectory $InstallDir
+
 Write-Host ""
 Write-Host "== 完成 ==" -ForegroundColor Green
-Write-Host "  托盘壳已启动（状态灯: 绿=已连接 / 黄=重连中 / 灰=已停止）"
-Write-Host "  日志: $logFile"
-if ($PairCode)  { Write-Host "  配对码: $PairCode（M3 控制面配对预留）" }
-if ($EnableShellControl) { Write-Host "  shell 受控能力: 已开启（M3 生效）" }
+Write-Host "  服务 AgentBusCore: 运行中（自动启动，崩溃 5s 重启）"
+Write-Host "  托盘 UI: 已启动（状态灯: 绿=已连接 / 黄=重连中 / 灰=已停止）"
+Write-Host "  服务日志: $InstallDir\data\service.log"
+Write-Host "  托盘日志: $trayLogFile"
+Write-Host "  开始菜单: 开始菜单 → Agent Bus → Agent Bus Tray（恢复托盘用）"
+Write-Host "  管理命令: python scripts\agent_service.py status/stop/start/remove
+if ($Queue) { Write-Host "  队列: $Queue" }
+if ($EnableShellControl) { Write-Host "  shell 受控能力: 已开启" }

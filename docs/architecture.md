@@ -234,44 +234,27 @@ task_request payload 增加字段: op
 
 ---
 
-## 6. 授权与安全模型
+## 6. 授权与安全模型（简化版）
 
-**信任假设**：局域网、组织内可信设备（用户已确认）。在此前提下，通信与任务通道保持 v2 匿名（免口令入队），**控制面单独授权一次**。
+**信任假设**：所有设备在高度安全的局域网内，设备均为可信设备。在此前提下，不做密码学验签，仅做 sender 身份白名单检查。
 
-### 6.1 配对机制（一次性安装码 + 本地派生密钥，v0.4）
+### 6.1 控制消息身份检查
 
-**目标**：人工只输入 8 位短码，不搬运长随机码；安装码完全不过网络。
+控制消息不再使用 HMAC 验签，改为 sender_id 白名单检查：
+- 控制消息（shell_exec / executor_* / upgrade）仅接受来自 `hub-*` 身份的 sender
+- 检查在 worker 侧 `comm_node.py` 的 `_handle_shell_exec` 中完成
+- 非 hub 身份发送的控制消息直接拒绝
 
-```
-1. 主控面板「安全设置」生成一次性安装码（8 位短码，15 分钟有效，一次性），
-   同时本地算好配对密钥 K = HKDF-SHA256(安装码, info="agent-bus-ctrl-v1")
-2. 人工把短码输入受控机（setup_worker_windows.ps1 -PairCode 或交互输入）
-3. worker 本地派生 K（安装码只在 worker 内存，不发送、不落盘）
-4. worker POST /api/pair {agent_id, proof = HMAC(K, "pairing")}
-5. bus_server 用已知 K 校验 proof → 配对成功，登记 agent_id
-6. 安装码立即作废（一次性 + 15 分钟有效期双保险），仅 K 长期有效
-7. 之后控制消息由 hub 用 K 签名（HMAC-SHA256），worker 验签通过才执行
-```
+### 6.2 队列标识
 
-- **安装码零网络传输**：两端各自本地算 K，嗅探者拿不到码更拿不到 K。
-- K 存储：主控侧（bus_server/hub）与受控侧 worker 本地各一份；任一侧 K 泄露 → 面板重置（K 作废，全部 worker 重新配对，动作入审计）。
-- 验签成本：HMAC-SHA256 ≈ 0.5–2µs/条，100 条/秒无感知；**不引入消息加密**（局域网明文，信任边界内，见 §6.6）。
-- 非对称密钥不引入：当前无不可抵赖需求；未来跨信任域再升级（Ed25519 签名同样微秒级）。
-
-### 6.2 授权规则（两层）
-
-| 操作 | 允许发送方 | 授权 | 目标 |
-|---|---|---|---|
-| run（对话/任务） | **任意入队智能体** | 匿名（现状不变） | 任意执行器 |
-| executor_activate / deactivate | 仅 hub | 配对密钥 K 验签 | 本 worker 节点 |
-| shell_exec / fs | 仅 hub | K 验签 + shell_control 开关 | 本 worker 节点 |
-| upgrade | 仅 hub | K 验签 | 本 worker 节点 |
+- 安装时通过 `-Queue` 参数指定队列归属（纯文本标识，用于区分不同队伍）
+- 队列标识不派生密钥，不参与验签，仅用于组织归属
 
 ### 6.3 shell/fs 一次性开启（免二次确认，但状态可见）
 
 - worker 本地持久化开关 `shell_control`（`runtime/control_config.json`），**安装后默认关**。
-- 开启动作发生在**受控电脑本地**（托盘菜单勾选，或安装脚本参数 `-EnableShellControl`），一次即可；之后控制消息验签通过即执行，**不再弹确认**。
-- 开启状态**常驻可见**：托盘菜单勾选态 + 状态灯角标；随时可关（熔断原则）。
+- 开启动作发生在**受控电脑本地**（托盘菜单勾选，或安装脚本参数 `-EnableShellControl`），一次即可；之后控制消息来自 hub 身份即执行，**不再弹确认**。
+- 开启状态**常驻可见**：托盘菜单勾选态；随时可关（熔断原则）。
 - 关闭时收到 shell_exec：拒绝并回 `task_result(status=error, reason=shell_control_disabled)`，入审计。
 
 ### 6.4 受控可见性（强制，不可关闭）
@@ -280,19 +263,6 @@ task_request payload 增加字段: op
 1. **托盘通知气泡**："主控 `hub-xxx` 正在执行: <命令摘要>"
 2. **本地 control.log**：追加时间/发送方/op/命令/结果摘要（托盘菜单可查看）
 3. **bus_server 审计**：全量消息入库（面板可检索）
-
-### 6.5 安全红线
-
-- **shell 能力 + 匿名 broker = 高危组合**：若无 §6.1 签名保护，等于对局域网开放目标机 shell。配对密钥 K 是硬约束，不是可选项。
-- 安装码不得经匿名 /api/join 分发，且全程不过网络（§6.1）——只能人工输入到受控机。
-- 提权通道（§7）开启时攻击面扩大，必须同受 K 签名保护 + 强制审计。
-
-### 6.6 验签 ≠ 加密（CPU 负担澄清）
-
-- 本架构只做**消息验签**（防伪造/防冒充），**不做消息加密**（防偷听）。
-- 理由：信任边界 = 局域网可信组织内设备，偷听已排除；消息明文走 MQTT（v2 匿名基线不变）。
-- 成本：HMAC-SHA256 ≈ 0.5–2µs/条，100 条/秒对现代 CPU 完全无感；即便未来引入 Ed25519 签名也仅微秒级。
-- 真正吃 CPU 的是传输层加密（TLS/AES），本架构局域网内**不引入**；仅公网/跨网部署时按 docs/broker_setup.md 启用 TLS。
 
 ---
 
@@ -366,48 +336,71 @@ task_request payload 增加字段: op
 
 ---
 
-## 11. 开放问题（v0.3 收敛后）
+## 11. 开放问题（当前状态）
 
 | # | 问题 | 状态 |
 |---|---|---|
-| O1 | hub 身份凭据保护 | **已定**：一次性安装码 + 本地派生密钥 K + HMAC 配对（§6.1） |
+| O1 | hub 身份校验 | **已定**：sender 身份白名单检查（仅 hub-* 可发控制消息，§6.1） |
 | O2 | shell 确认交互频率 | **已定**：shell_control 一次性开关（§6.3） |
 | O3 | Linux 受控端 comm node | 保持后置（沿用 setup_linux.sh），随 M 阶段评审再定 |
-| O4 | 多 hub 场景 | 暂单 hub；多 hub 需定义 hub 间互信（配对密钥共享机制） |
+| O4 | 多 hub 场景 | 暂单 hub；多 hub 需定义互信机制 |
 | O5 | 提权方案 | **已定并采纳**：方案 B 最高权限计划任务，M6（§7.2） |
-| O6 | 提权通道的独立审计与告警强度 | 待 M6 设计时细化（建议：提权操作额外发一条高亮审计） |
-| O7 | 对话路由的 `via` 审计字段是否需要前端展示 | 待 M2 评审时定（面板消息时间线展示路由节点） |
+| O6 | 提权通道的独立审计与告警强度 | 待 M6 设计时细化 |
+| O7 | 对话路由的 `via` 审计字段是否需要前端展示 | 待 M2 评审时定 |
 
 ---
 
-## 12. 重构基线（v0.5 冻结，Phase 0）
+## 12. 重构基线（v1.0，Phase 1-5 全部完成）
 
-> 本节约定重构落地后的目标形态，作为 Phase 1–5 实施的唯一基线。实施完成前，§2–§8 的旧形态描述仍是当前代码现状。
+> 架构重构全部 5 个 Phase 已完成。
+> 详见各阶段记录文档（架构重构Phase[1-5]记录_*.md）。
 
-### 12.1 三组件形态（职责分离）
+### 自动化测试（Phase 5）
+
+| 测试文件 | 覆盖 | 状态 |
+|---------|------|------|
+| `tests/test_phase5_state_machine.py` | #1 state.json active→disabled 切换，core_node 行为 | ✅ 6/6 通过 |
+| `tests/test_phase5_crash_and_hang.py` | #2 子进程崩溃秒级拉起 #3 心跳文件刷新 | ✅ 6/6 通过 |
+| `tests/test_phase5_dual_launch.py` | #4 双重拉起防护，清理旧计划任务 | ✅ 18/18 通过 |
+| `tests/test_phase5_concurrent_write.py` | #5 状态文件并发写，原子写无损坏 | ✅ 8/8 通过 |
+
+### 手动验证
+
+详见 `架构重构Phase5_手动验证指南.md`（6 项测试覆盖安装验证、状态机切换、SCM 自愈、受控角标、远程更新、旧任务清理）。
+
+### 12.1 三组件形态（职责分离）✅ Phase 1 已完成
 
 | 组件 | 文件 | 运行形态 | 职责 |
 |---|---|---|---|
-| **core_node**（Layer 1 底层控制通道） | `executor/core_node.py`（由 comm_node.py 改造） | Windows SCM 服务（SYSTEM 权限） | MQTT 总线连接、shell_exec / executor_* / upgrade 验签执行、执行器进程树监督；**剥离全部 pystray GUI 与状态灯**；固化后极少变动 |
-| **tray_app**（Layer 2+ 可视化前端） | `executor/tray_app.py`（新增） | 用户桌面会话（登录即起） | 读 state.json + 心跳显示红/黄/绿灯；「启用 / 彻底退出」写状态机；轮询 control.log 弹通知气泡；**不含业务与控制逻辑** |
-| **SCM 看门狗** | Windows 服务管理器（NSSM / WinSW 包装） | 系统服务 | 最终守护者：core_node 崩溃/自杀后自动重启；disabled 状态休眠不拉起 |
+| **core_node**（Layer 1 底层控制通道） | `executor/core_node.py`（✅ 已创建） | 当前 headless 进程；Phase 2 注册为 Windows SCM 服务 | MQTT 总线连接、shell_exec 指令接收与执行（sender 身份检查）、执行器进程树监督；**无 GUI 依赖**；固化后极少变动 |
+| **tray_app**（Layer 2+ 可视化前端） | `executor/tray_app.py`（✅ 已创建） | 用户桌面会话（登录即起） | 读 state.json + 心跳显示绿/黄/灰灯；「启用 / 彻底退出」写状态机；轮询 control.log 弹通知气泡；**不含业务与控制逻辑** |
+| **comm_node.py**（兼容包装） | `executor/comm_node.py`（✅ 委托 core_node） | 保持旧 CLI 入口不变 | 检测到 --headless 或 --role hub 时委托 core_node.py；其他情况提示迁移 |
+| **SCM 看门狗** | Windows 服务管理器（NSSM 包装 `scripts/agent_service.py`） | ✅ **系统服务**（Phase 2 已完成） | 最终守护者：core_node 崩溃/自杀 5s 内自动重启；disabled 状态休眠不拉起 |
 
-### 12.2 状态机（持久化，解耦「手动关闭」与「自动拉起」）
+### 12.2 状态机（持久化，解耦「手动关闭」与「自动拉起」）✅ Phase 1 已完成
 
 - 文件：`data/runtime/state.json`，**原子写**（临时文件 + rename）。
+- 模块：`agent_bus/state_machine.py`（✅ 已创建）—— `read_state` / `write_state` / `is_active` / `is_disabled`。
 - 枚举：`active`（运行态，Watchdog 必须拉起）/ `disabled`（停用态，Watchdog 停止拉起并杀进程）。
 - 托盘「彻底退出」= 写 `disabled`；「启用」= 写 `active`（打开托盘默认**不**自动激活，需显式启用，D7）。
 
-### 12.3 服务化自愈层级（替代原三层自愈）
+### 12.3 服务化自愈层级（替代原三层自愈）✅ Phase 1-2 已完成
 
 ```
-[Windows SCM]              最终守护 → core_node 崩溃/自杀 5s 内 restart
-[core_node 内部 watchdog]   心跳过期(<30s) → 主动退出，触发 SCM 重启（防卡死）
-[core_node]                秒级 → 监督/拉起执行器子进程（崩溃即重启）
+[Windows SCM (NSSM)]       最终守护 → core_node 崩溃/自杀 5s 内 restart ✅
+[core_node 内部 watchdog]   心跳过期(>35s) → 主动退出，触发 SCM 重启（防卡死）✅
+[core_node]                秒级 → 监督/拉起执行器子进程（崩溃即重启）✅
 [执行器]                    承载 → 智能体任务逻辑
 ```
 
-- 原 schtasks（AgentBusShell / AgentBusShellWatchdog）**废弃**，升级脚本强制清理（D5）。
+- **NSSM 服务**：`AgentBusCore`，注册为 `SERVICE_AUTO_START`，崩溃/退出 5s 后自动重启。
+- **服务入口**：`scripts/agent_service.py`（NSSM 的 Application Path 指向此脚本）。
+  - 启动时读取 state.json → `active` 则委托 core_node.py；`disabled` 则休眠等待启用事件。
+- **服务内 watchdog 线程**：`CoreNode._self_watchdog_loop()`，每 5s 检查心跳文件，超过 35s 未刷新则 `os._exit(1)`。
+- **管理工具**：`python scripts/agent_service.py install/remove/start/stop/status`。
+- **NSSM 二进制**：`scripts/_dl/nssm.exe`（sha256 固定，随包分发）。
+- **托盘 UI 计划任务**：`AgentBusTray`（onlogon，启动 `tray_app.py`），不再由计划任务拉起 core_node。
+- 原 schtasks（AgentBusShell / AgentBusShellWatchdog）**已废弃**，升级脚本自动清理（D5）。
 
 ### 12.4 前置决策定案（D1–D9）
 

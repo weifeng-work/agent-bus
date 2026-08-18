@@ -1,46 +1,40 @@
 # Agent Bus —— 局域网多智能体协作总线
 
-让同一局域网内的任意智能体（CodeBuddy / OpenCode / WorkBuddy / TRAE…）互相发现、收发任务、共享文件，全程可追溯、可视化。**主机一键起服务，子设备给智能体一句提示词即可加入队伍。**
+让同一局域网内的任意智能体（CodeBuddy / OpenCode / WorkBuddy / TRAE…）互相发现、收发任务、共享文件，全程可追溯、可视化。**主机一键起服务，受控机给智能体一句提示词即可加入队伍。**
 
-## 核心模型
-
+**工作流程**：
 ```
-[ 主机 1 台 ]
-   运行 broker(MQTT) + bus_server(HTTP/面板)
-   面板首次向导：设置【队伍名】（一次）
-   每 3s UDP 广播 beacon（队名/主机 IP/端口）→ 局域网内可被发现
+主机 1 台：运行 MQTT broker + HTTP 面板 + 服务端
+   每 3s UDP 广播 beacon（队伍名/主机 IP/端口）→ 局域网内可被发现
         │
         ▼ UDP beacon 41830 / MQTT 1883 / HTTP 8000
         │
-[ 子设备 N 台 ]
-   智能体收到一句提示词 → setup_worker_windows.ps1
-      → 发现主机（UDP beacon）→ 匿名登记入队（无口令/凭据）
-      → 安装通信节点（托盘壳，三层自愈）→ 启动执行器 → 上线
+受控机 N 台：
+   智能体收到一句提示词 → 自动下载安装脚本
+     → 发现主机 → 入队 → 注册 NSSM 服务 + 启动托盘 UI
+     → 执行器上线 → 状态灯变绿
 ```
 
-- **出站连接模型**：所有节点主动连主机（MQTT/HTTP），无需公网 IP、无需内网穿透、不开入站端口。
-- **发现即用**：子设备扫描局域网 beacon 自动发现主机；广播不可达时可用 `--host <IP>` 手动指定。
-- **安全**：局域网可信边界——broker `allow_anonymous true`，HTTP 面板/API 匿名可读，入队免口令；**控制面独立配对**（一次性安装码 + 本地派生密钥，见安全模型）。
-- **一键入队**：子设备发现队伍即自动入队，无需口令/凭据（信任 = 局域网可达）。
-- **受控机免维护**：通信节点三层自愈（托盘壳秒级拉起执行器 + OS 计划任务分钟级兜底），用户只需不睡眠、不锁屏。
+---
 
-## 需要什么
+## 目录
 
-| 角色 | 一台 Windows/Linux 机器即可 | 前置 |
-|---|---|---|
-| **主机** | Python 3.10+；配网卡接收 UDP 广播 | mosquitto 会自动装 |
-| **子设备** | Python 3.10+（自动装）；目标机器的 CLI 智能体 | 同局域网可达主机 |
-
-> Windows 上 Python 可用 winget 自动安装；无需 git（直接下载主分支 zip）。
+- [一、主机安装（一次）](#一主机安装一次)
+- [二、受控机安装（每台电脑各跑一次）](#二受控机安装每台电脑各跑一次)
+- [三、智能体接入方式（MCP / CLI）](#三智能体接入方式mcp--cli)
+- [四、远程 Shell（受控机完全 Shell 权限）](#四远程-shell受控机完全-shell-权限)
+- [五、项目结构](#五项目结构)
+- [六、安全模型](#六安全模型简化版)
+- [七、已知约束](#七已知约束)
 
 ---
 
 ## 一、主机安装（一次）
 
-在某台 Windows/Linux 机器跑一键引导（跨平台，同一脚本）：
+在一台 Windows/Linux 机器上跑一键引导：
 
 ```powershell
-# Windows 或 Linux 一致：下载后运行
+# Windows 或 Linux
 python -c "import urllib.request,sys; urllib.request.urlretrieve('https://raw.githubusercontent.com/weifeng-work/agent-bus/main/scripts/setup_host.py','host.py')"
 python host.py
 ```
@@ -50,39 +44,46 @@ curl -fsSL https://raw.githubusercontent.com/weifeng-work/agent-bus/main/scripts
 ```
 
 完成后：
-- broker(MQTT) 监听 `0.0.0.0:1883`，bus_server(HTTP+面板) 监听 `0.0.0.0:8000`
+- MQTT broker 监听 `0.0.0.0:1883`，HTTP 面板监听 `0.0.0.0:8000`
 - 自动打开面板 `http://<主机IP>:8000/`
 - **首次进入面板：设置队伍名** → 之后 beacon 广播自动开始
 
 面板功能：在线名单 / 消息时间线 / 文件列表 / 移除节点。
 
-> 参考主机的候选 IP：`python -c "from agent_bus import provision; print(provision.get_local_ips())"`
-
 防火墙放行（入站）：`TCP 1883`（MQTT）`TCP 8000`（HTTP）`UDP 41830`（beacon 发现）。
 
 ---
 
-## 二、子设备给智能体一句提示词安装（受控节点 = 通信节点 + 执行器）
+## 二、受控机安装（每台电脑各跑一次）
 
-**第 0 步（主控机，人工）**：设定控制面配对密码——打开面板 → 安全设置 → 输入一个人工决定的**配对密码**（可含大小写/数字/符号，1-64 位）→ 设定。密码 15 分钟有效、一次性、不落网；把密码告诉受控机的人（或写进提示词）。
+### 方式 A：让智能体自动安装（推荐）
 
-在目标 Windows 电脑上，对着那台电脑的智能体说（示例；**配对密码放最后一行**，方便你手动追加——不给密码也可以，装完后由人在受控机托盘菜单输入）：
+在目标 Windows 电脑上，对着那台电脑的智能体说：
 
-> “用 https://github.com/weifeng-work/agent-bus 把 agent-bus 作为受控节点装到我这台 Windows。
-> 项目 README 里有完整安装说明：需要 Python 3.10+（没有就用 winget 装 Python.Python.3.12），运行 scripts/setup_worker_windows.ps1（会自动装依赖、入队、安装通信节点托盘并启动执行器；拿到配对密码后，用它通过脚本参数 -PairCode 完成控制面配对即可，无需人工再输入）。
+> 用 https://github.com/weifeng-work/agent-bus 把 agent-bus 作为受控节点装到我这台 Windows。
+> 项目 README 里有完整安装说明：需要 Python 3.10+（没有就用 winget 装 Python.Python.3.12），运行 scripts/setup_worker_windows.ps1（会自动装依赖、入队、安装通信节点 NSSM 服务并启动托盘）。
 > 装完任务栏会出现 Agent Bus 托盘图标（绿色=已连接），告诉我分配到的 agent_id。
->
-> 配对密码是：<密码>”
 
-智能体读 README 后会自动执行：装 Python → 下载项目 → 装依赖 → 发现主机 → 入队 → 安装通信节点（托盘壳）→ 配对 → 启动执行器 → 上线。**智能体从提示词拿到密码后即可自动完成配对，无需人工在目标机再输入**；只有当密码缺失/无效/过期时，才需要人工在托盘菜单「输入配对码」补配对。
+智能体读 README 后会自动执行：
+1. 检测/安装 Python 3.10+
+2. 下载项目代码
+3. 安装 Python 依赖
+4. 发现主机并匿名入队
+5. 清理旧版计划任务
+6. 注册 NSSM 服务 `AgentBusCore`（自动启动，崩溃 5 秒重启）
+7. 创建开始菜单快捷方式
+8. 启动服务 + 托盘 UI
 
-> 即使提示词没有配对密码、或密码已过期/无效，智能体也会完成**其他一切安装工作**，节点照常上线；配对可以延后——受控机人工在托盘菜单「输入配对码」弹窗输入密码即可激活控制面。
+**整个过程无需人工干预，无需输入任何密码。**
 
-手动/非交互安装：
+### 方式 B：手动安装
 
 ```powershell
+# 下载安装脚本
 irm https://raw.githubusercontent.com/weifeng-work/agent-bus/main/scripts/setup_worker_windows.ps1 -o C:\setup_worker.ps1
-powershell -ExecutionPolicy Bypass -File C:\setup_worker.ps1 -PairCode '人工密码' -EnableShellControl
+
+# 以管理员身份运行（需要管理员权限注册 NSSM 服务）
+powershell -ExecutionPolicy Bypass -File C:\setup_worker.ps1 -Queue myteam -EnableShellControl
 ```
 
 | 参数 | 说明 |
@@ -90,34 +91,81 @@ powershell -ExecutionPolicy Bypass -File C:\setup_worker.ps1 -PairCode '人工�
 | `-Host` | 主机 IP（省略则 UDP 扫描自动发现） |
 | `-Executor` | 启动哪个执行器：`codebuddy` / `opencode` / `workbuddy`（默认 codebuddy） |
 | `-Name` | 设备显示名（默认 `执行器@主机名`） |
-| `-PairCode` | 配对密码（主控人工设定后告知；省略则装完由托盘菜单补配对） |
-| `-EnableShellControl` | 安装即开启 shell 受控能力（默认关；开启后免二次确认，状态托盘常驻可见） |
-
-脚本依次完成：下载项目（默认 `C:\agent-bus`，普通权限不可写时**自动改用 `%LOCALAPPDATA%\agent-bus`**）→ `pip install` 依赖 → `scripts/join_team.py` 入队 → 安装通信节点（`scripts/setup_tray.ps1`：生成 start_tray.bat + 注册 `AgentBusShell` 登录自启 + `AgentBusShellWatchdog` 分钟兜底）→ 启动托盘壳 → 监督拉起执行器。
+| `-Queue` | 队列标识（可选，用于区分不同队伍） |
+| `-EnableShellControl` | 安装即开启 shell 受控能力（默认关） |
 
 > 目标机器的 CLI 智能体（CodeBuddy/OpenCode）需已安装并登录，执行器才能接任务。
-> Linux 子设备见 [scripts/setup_linux.sh](scripts/setup_linux.sh)（角色：Skill 主动协作者 / Worker 被召唤执行）。
+> Linux 受控机见 [scripts/setup_linux.sh](scripts/setup_linux.sh)。
+
+### 安装后验证
+
+- 任务栏托盘区出现 Agent Bus 图标（绿色=已连接）
+- 服务管理器（`services.msc`）中可见 `AgentBusCore` 服务，状态"运行中"，启动类型"自动"
+- 开始菜单 → Agent Bus → Agent Bus Tray（恢复托盘用）
+- 主机面板 `http://<主机IP>:8000/` 可见新节点上线
 
 ---
 
-## 三、用起来（在主机面板 / 任意节点）
+## 三、智能体接入方式（MCP / CLI）
 
-1. **查看在线名单**：面板 `http://<主机IP>:8000/`，所有设备主动连主机，可见 `● 在线 / ○ 离线`。
-2. **给某节点发任务**（在 Skill 模式节点或主机上）：
-   ```bash
-   # 先登录/认证（Skill 节点）
-   python skill/cli.py agents
-   python skill/cli.py send --to codebuddy_pc2 --text "帮我在对方机器上执行 hostname 并汇报" --wait 300
-   ```
-   → 对方执行器 headless 拉起本机 CodeBuddy 执行 → 结果 + session_id 自动回传。
-3. **延续对话**：回传的 `session_id` 可带 `--session <sid>` 继续同一上下文。
+智能体安装 Agent Bus 后，还需要配置接入方式才能收发消息。有两种方式：
+
+### 方式 A：MCP Server（推荐，适用于支持 MCP 的智能体客户端）
+
+在智能体客户端的 MCP 配置中添加（以 CodeBuddy 为例，写入 `mcp_servers.json`）：
+
+```json
+{
+  "mcpServers": {
+    "agent-bus": {
+      "command": "python",
+      "args": ["<安装目录>/skill/mcp_server.py"],
+      "env": {
+        "BUS_AGENT_ID": "<智能体ID>"
+      }
+    }
+  }
+}
+```
+
+**说明**：
+- 主控机 IP 和端口不用填，`mcp_server.py` 会自动读取安装时生成的 `bus.env`
+- 安装目录默认 `%LOCALAPPDATA%\agent-bus`（Windows）或 `~/.local/share/agent-bus`（Linux）
+- `<智能体ID>` 取一个唯一标识，如 `agent_pc1`，每台机器不同
+
+配置完成后，智能体就能通过 MCP 工具使用总线能力：
+- `list_online_agents` — 查看当前在线智能体
+- `send_task` — 给目标智能体发任务并等待结果
+- `check_inbox` — 拉取自己的收件箱
+- `reply_task` — 回传任务结果
+- `upload_file` / `download_file` — 文件上传下载
+
+### 方式 B：CLI 命令行（适用于不支持 MCP 的智能体，或脚本调用）
+
+```bash
+# 注册自己（声明存在和能力）
+python skill/cli.py register --name "分析Agent" --caps analysis
+
+# 查看在线智能体
+python skill/cli.py agents
+
+# 发任务
+python skill/cli.py send --to agent_pc2 --text "分析数据" --wait 300
+
+# 拉取收件箱
+python skill/cli.py check --timeout 5
+
+# 回传结果
+python skill/cli.py reply --req-file req.json --text "完成"
+```
+
+两种方式功能完全等价，都包含注册、发任务、收消息、回传结果、文件上传下载。
 
 ---
 
 ## 四、远程 Shell（受控机完全 Shell 权限）
 
-已配对（安装时 `-PairCode`）且开启 shell 受控能力（`-EnableShellControl`）的受控节点，
-主控机可直接执行任意命令（SSH 权限级别，无需 SSH）：
+已开启 shell 受控能力（`-EnableShellControl`）的受控节点，主控机可直接执行任意命令（SSH 权限级别，无需 SSH）：
 
 ```bash
 # 主控机：向受控节点发命令并等待回执
@@ -129,42 +177,99 @@ python executor/comm_node.py --role hub --shell-exec \
   --target node-host-4f2a --cmd "dir C:\\Users" --timeout 60
 ```
 
-- 受控节点 `agent_id` 见其 `~/.config/agent-bus/device.json`（节点身份为 `node-<agent_id>`）。
-- 每次执行：受控机托盘弹通知气泡 + 本地 `control.log` 记录 + bus_server 全量审计（三处留存）。
-- 未开启 shell 受控能力 → 拒绝 `shell_control_disabled`；伪造签名 → 拒绝 `验签失败`。
-- 关闭方法：受控机托盘菜单取消勾选「shell 受控能力」。
+- 受控节点 `agent_id` 见其 `~/.config/agent-bus/device.json`（节点身份为 `node-<agent_id>`）
+- 每次执行三处留存：受控机托盘通知气泡 + 本地 `control.log` + bus_server 全量审计
+- 未开启 shell 受控能力 → 拒绝；关闭方法：托盘菜单取消勾选「shell 受控能力」
 
 ---
 
-## 目录
+## 五、项目结构
 
-| 路径 | 说明 |
-|---|---|
-| `scripts/setup_host.py` | 主机一键引导（装 mosquitto + 起 broker/server + 打开面板） |
-| `scripts/join_team.py` | 子设备入队（发现队伍 → 匿名登记 → 上线） |
-| `scripts/setup_worker_windows.ps1` | 子设备 Windows 一键引导（装 Python/依赖/入队/装通信节点/启执行器） |
-| `scripts/setup_tray.ps1` | 通信节点安装（start_tray.bat + AgentBusShell 登录自启 + Watchdog 分钟兜底） |
-| `scripts/watchdog.py` | OS 计划任务兜底：托盘壳挂则拉起 |
-| `scripts/setup_linux.sh` | Linux 子设备接入（Skill 主动 / Worker 被召） |
-| `scripts/add_node.py`（遗留）/ `broker_ctl.py` | 历史凭据管理（v2 匿名化后常规入队不再需要）/ 用户态 broker 进程管理 |
-| `agent_bus/` | Python SDK（MQTT 客户端、discovery 发现协议、files、crypto 控制面、遗留 provision 凭据逻辑） |
-| `server/bus_server.py` | 服务端（MQTT 桥 + SQLite + HTTP API + 面板 + 控制面配对端点） |
-| `executor/` | 各 CLI 执行器：codebuddy / opencode / workbuddy / interactive |
-| `executor/comm_node.py` | 通信节点（托盘壳）：三层自愈 + 监督 + 熔断 + shell 控制面（worker/hub 同构） |
-| `skill/` | 通信 Skill：`SKILL.md` + `cli.py`（CLI）+ `mcp_server.py`（MCP 工具） |
-| `docs/protocol.md` | 通信契约 + 队伍发现协议（UDP beacon v1.2） |
-| `docs/architecture.md` | 通信节点架构设计 v0.4（hub/worker 同构、配对机制、提权方案） |
+```
+agent-bus/
+├── scripts/                        # 安装与运维脚本
+│   ├── setup_host.py               # 主机一键引导（装 mosquitto + 起 bus_server + 面板）
+│   ├── setup_worker_windows.ps1    # 受控机 Windows 一键安装（NSSM 服务 + 托盘）
+│   ├── setup_tray.ps1              # 通信节点安装（NSSM 注册 + 开始菜单快捷方式 + 计划任务）
+│   ├── agent_service.py            # NSSM 服务包装入口 + 管理工具（install/remove/start/stop）
+│   ├── remote_update_worker.ps1    # 远程更新脚本（服务形态：停服务 → 替换代码 → 起服务）
+│   ├── join_team.py                # 子设备入队（UDP 发现主机 → 匿名登记 → 上线）
+│   ├── watchdog.py                 # 旧版计划任务兜底（兼容旧部署）
+│   └── setup_linux.sh              # Linux 受控机接入
+│
+├── executor/                       # 核心执行器
+│   ├── core_node.py                # Layer 1 核心控制节点（无头，MQTT + shell_exec + 执行器监督 + 自愈 watchdog）
+│   ├── tray_app.py                 # Layer 2+ 托盘 UI（纯可视化，读 state.json 显示状态）
+│   ├── comm_node.py                # 兼容包装（委托 core_node.py）
+│   ├── codebuddy_executor.py       # CodeBuddy CLI 执行器
+│   ├── opencode_executor.py        # OpenCode CLI 执行器
+│   ├── workbuddy_executor.py       # WorkBuddy GUI 执行器
+│   ├── interactive_executor.py     # 交互式执行器（psmux 可视窗口）
+│   ├── mux_transport.py            # 多路复用传输层
+│   └── _tray.py                    # 旧版托盘 UI（已废弃，保留兼容）
+│
+├── agent_bus/                      # Python SDK
+│   ├── client.py                   # MQTT 客户端（注册/心跳/收发消息/状态上报）
+│   ├── config.py                   # 集中配置（环境变量：BUS_BROKER_HOST 等）
+│   ├── crypto.py                   # 身份检查（is_hub_message / is_control_op）
+│   ├── state_machine.py            # 状态机（state.json 原子读写，active/disabled）
+│   ├── discovery.py                # UDP beacon 发现协议
+│   ├── schema.py                   # 消息报文规范
+│   ├── files.py                    # 文件上传下载（Claim-Check）
+│   └── provision.py                # 网络工具（获取本地 IP 等）
+│
+├── server/                         # 服务端
+│   ├── bus_server.py               # 中间架构服务端（MQTT 桥 + SQLite + HTTP API + 面板）
+│   └── static/index.html           # Web 控制面板
+│
+├── skill/                          # 智能体接入层
+│   ├── SKILL.md                    # 技能说明书（智能体读取后知道如何接入）
+│   ├── mcp_server.py               # MCP Server（暴露 bus_* 工具给 MCP 客户端）
+│   └── cli.py                      # CLI 命令行工具（供不支持 MCP 的智能体使用）
+│
+├── tests/                          # 测试
+│   ├── test_phase5_state_machine.py    # 状态机切换测试
+│   ├── test_phase5_crash_and_hang.py   # 崩溃恢复 + 心跳测试
+│   ├── test_phase5_dual_launch.py      # 双重拉起防护测试
+│   ├── test_phase5_concurrent_write.py # 状态文件并发写测试
+│   ├── _test_crypto.py                 # 身份检查单测
+│   ├── _neg_shell.py                   # 负向测试（非 hub 拒绝）
+│   └── _smoke_comm_node.py             # M1 冒烟测试
+│
+├── docs/                           # 设计文档
+│   ├── architecture.md             # 架构设计（v1.0，Phase 1-5 重构完成）
+│   ├── protocol.md                 # 通信契约 + 队伍发现协议
+│   ├── git_central_repo.md         # Git 中心仓协作方案
+│   ├── broker_setup.md             # MQTT Broker 搭建说明
+│   └── backing_agent_probe.md      # 后备 Agent 探测方案
+│
+└── data/                           # 运行时数据（自动生成）
+    ├── runtime/                    # 运行时状态（state.json、心跳文件等）
+    │   ├── _dl/nssm.exe            # NSSM 2.24（随包分发）
+    │   └── ...
+    ├── bus.db                      # SQLite 消息库
+    └── files/                      # 上传文件存储
+```
 
-## 安全模型（简，v2 匿名化 + 控制面配对）
+---
 
-- **信任边界 = 局域网**：broker `allow_anonymous true`，`/api/join` 免口令登记入队，面板与 API 全匿名可读（服务端 conf 与 `bus_server.py` 实测一致）。
-- **已移除逐节点凭据**：不再发放 MQTT 独立账号（PBKDF2）/ HTTP Bearer 令牌（见 git `4c805e7`）；`scripts/add_node.py` 保留为历史凭据管理工具。
-- **控制面独立配对**（架构 v0.4 §6.1）：主控面板由**人类设定一次性配对密码**（可含任意字符 1-64 位、15 分钟有效、仅本机 API 可设定）→ 密码人工告知受控机（提示词或人工托盘输入）→ 两端各自本地派生配对密钥 `K=HKDF(密码)`（密码不落网、不落盘）→ `/api/pair` proof 校验后密码即作废。之后 hub 发控制命令带 `HMAC(K)` 签名，worker 验签通过才执行——**无 K 无法伪造控制消息**。
-- **验签 ≠ 加密**：只做 HMAC 验签（防伪造，微秒级），不做消息加密（局域网可信，偷听已排除）；TLS 仅公网部署需要（见 `docs/broker_setup.md`）。
-- **仅限可信局域网**：任何能访问 `1883/8000` 端口的设备都可入队并读到全部消息。跨网/公网部署需恢复认证或加 TLS。
+## 六、安全模型（简化版）
 
-## 已知约束
+本设计适用于**高安全局域网 + 所有设备可信**的环境：
 
-- 子设备节点需保证局域网可达主机（同网段或可路由）。
-- Windows GUI 执行器（WorkBuddy）须跑在用户会话、不能锁屏；CLI 执行器无此限制。
-- 广播发现对跨 VLAN/AP 隔离可能失效，此时用 `--host <IP>` 手动加入。
+- **信任边界 = 高安全局域网**：所有设备均为可信设备，无外部攻击者能接入网络
+- **broker 匿名**：`allow_anonymous true`，`/api/join` 免口令登记入队，面板与 API 全匿名可读
+- **控制消息身份检查**：控制消息（shell_exec 等）仅接受来自 `hub-*` 身份的 sender，在 worker 侧检查
+- **队列标识**：安装时通过 `-Queue` 参数指定队列归属（纯文本，用于区分不同队伍）
+- **shell_control 本地开关**：受控机本地确认是否开放 shell 能力（默认关），开启后状态托盘常驻可见
+- **三处审计**：每次控制操作 → 托盘通知气泡 + 本地 control.log + bus_server 全量入库
+
+---
+
+## 七、已知约束
+
+- 受控机节点需保证局域网可达主机（同网段或可路由）
+- 安装脚本需要管理员权限（注册 NSSM 服务需要）
+- Windows GUI 执行器（WorkBuddy）须跑在用户会话、不能锁屏；CLI 执行器无此限制
+- 广播发现对跨 VLAN/AP 隔离可能失效，此时用 `--host <IP>` 手动加入
+- 目前仅 Windows 受控机有完整 NSSM 服务化支持；Linux 受控机沿用旧版 setup_linux.sh

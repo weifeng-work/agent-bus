@@ -56,6 +56,7 @@ class AgentBus:
         self._pending: dict = {}        # correlation_id -> {"event", "result"}
         self._pending_lock = threading.Lock()
         self._hb_thread = None
+        self._disconnected = False      # B3：标记已主动断开，心跳线程停止刷状态
         self._client = mqtt.Client(
             mqtt.CallbackAPIVersion.VERSION2,
             client_id=f"bus-{agent_id}-{int(time.time())}",
@@ -76,7 +77,7 @@ class AgentBus:
     # ---------- 状态文件上报（托盘壳/通信节点读） ----------
 
     def _write_status(self, status: str):
-        """写真实 bus 状态到状态文件；失败静默（不影响主流程）。"""
+        """写真实 bus 状态到状态文件；原子写（临时文件+rename），失败静默。"""
         if not self.status_file:
             return
         try:
@@ -86,9 +87,25 @@ class AgentBus:
                 "health": self.health,
                 "ts": time.time(),
             }
-            path = self.status_file
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(json.dumps(payload, ensure_ascii=False))
+            path = Path(self.status_file)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            content = json.dumps(payload, ensure_ascii=False)
+            # 原子写：临时文件 + rename（B5）
+            import tempfile
+            fd, tmp_path = tempfile.mkstemp(
+                suffix=".tmp", prefix="status_", dir=str(path.parent))
+            try:
+                os.write(fd, content.encode("utf-8"))
+                os.close(fd)
+                fd = None
+                os.replace(tmp_path, str(path))
+            except Exception:
+                if fd is not None:
+                    os.close(fd)
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
         except Exception:
             log.debug("状态文件写入失败: %s", self.status_file)
 
@@ -108,6 +125,7 @@ class AgentBus:
         return self
 
     def disconnect(self):
+        self._disconnected = True  # B3：标记已断开，心跳线程不再刷状态
         self._write_status("stopped")
         try:
             self._client.disconnect()
@@ -157,7 +175,7 @@ class AgentBus:
 
     def _heartbeat_loop(self):
         topic = f"bus/heartbeat/{self.agent_id}"
-        while True:
+        while not self._disconnected:
             self._client.publish(topic, json.dumps(
                 {"agent_id": self.agent_id, "ts": time.time(), "health": self.health}), qos=1)
             self._write_status("connected")  # 刷新状态文件 ts（新鲜度信号）

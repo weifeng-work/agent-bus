@@ -225,5 +225,5 @@ Git 中心仓的协调语义广播（设计见 docs/git_central_repo.md §6）�
 3. `POST /api/join`（匿名登记 agent_id/设备名）→ 返回 broker 连接信息
 4. 连接配置落 `~/.config/agent-bus/bus.env`，立即连 MQTT 注册验证上线
 
-安全：信任边界为局域网——`/api/join` 匿名放行，任何可访问 8000/1883 端口的设备
-均可入队并读取全部消息；公网部署需恢复认证或加 TLS（见 `docs/broker_setup.md`）。
+安全：信任边界为高安全局域网，所有设备均为可信设备——`/api/join` 匿名放行，
+控制消息仅通过 sender 身份检查（仅接受 hub-* 身份发送的控制消息）。

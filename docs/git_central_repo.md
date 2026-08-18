@@ -1,9 +1,9 @@
 # Git 中心仓协作方案（Git Central Repo）
 
 > 版本：v0.3（已评审，全部决策已确认，已吸收外部评审意见）
-> 状态：待施工
+> 状态：G1 已验收（2026-08-18）；G2 施工中
 > 关联：需求清单.md；docs/protocol.md（通信契约 v1.0）；docs/architecture.md（通信节点架构 v0.4）
-> 修订记录：v0.3（2026-08-19）按本机 opencode 外部评审裁决吸收八项改进，
+> 修订记录：v0.3（2026-08-18）按本机 opencode 外部评审裁决吸收八项改进，
 >   详见 §11 评审回应。
 > 用户已拍板决策（2026-08-18）：
 >   D1 鉴权：git daemon（端口 9418），完全无鉴权（与局域网可信边界一致）
@@ -265,11 +265,21 @@ codebuddy/opencode/traework 执行器完全同构——常驻连 bus、轮询 in
 | **G3 执行器集成** | task_request 带 repo/branch；worker 工作区自动 clone/复用；commit 身份 = agent_id；部署常驻 reviewer_main | bus 发任务 → agent 自动完成 建分支/干活/push/审查请求；reviewer 完成 审查/合并或驳回 闭环 |
 | **G4（可选）升级位** | gitea Web 审查 / 面板 git 视图 / worktree 并行 / LFS | 后置另议 |
 
-**交付记录（2026-08-19）**：G1 验收通过——Debian 二机（weifeng-pc，git 2.47.3）经
+**交付记录（2026-08-18）**：G1 验收通过——Debian 二机（weifeng-pc，git 2.47.3）经
 `git://192.168.31.186/agent-bus.git` clone/push 成功；hook 远程执行且三项负面测试全过
 （非法分支名拒、>10MB 拒、force 拒），task/* 删除放行——原属 G2 的 hook 验收提前完成。
-G2 剩余范围：daemon 登录无关计划任务持久化 + git_event 报文定义。
 施工踩坑已回写：`--enable=receive-pack` 新语法（§3.2）、裸仓 HEAD 须指 main（init 脚本内置）。
+
+**G2 现状（2026-08-18 更新）**：git_event 报文定义已完成（docs/protocol.md §2.7 v1.2 +
+scripts/send_git_event.py）；pre-receive 行尾已固定 LF（.gitattributes `eol=lf`）。
+G2 剩余：daemon 登录无关计划任务持久化 + git_event 面板可见性验证。
+
+**交付代码已 commit（2026-08-18，未 push）**：
+- `660aaf8` feat(interactive) psmux 可视附着窗口
+- `0380e90` feat(git) Git 中心仓协作（方案/钩子/init/daemon/watchdog/send + git_event 协议）
+- `8125103` feat(executor) TraeWork CN 执行器（CDP 桥接，审查者前置）
+- `236871a` docs Readiness Probe 设计文档（待评审）
+- `95065a4` fix(git) pre-receive 钩子固定 LF 行尾（.gitattributes eol=lf）
 
 ---
 
@@ -282,10 +292,12 @@ G2 剩余范围：daemon 登录无关计划任务持久化 + git_event 报文定
 - **仓库膨胀**：hook 硬拦单文件 >10MB（v0.3）；确有大资产需求再评估 LFS。
 - **驳回死循环**：反复 rebase 失败或同质补丁循环。缓解：驳回 ≥3 次自动升级人工（§6.1，v0.3）。
 - **多网卡歧路**：worker 必须连 192.168.31.186（WLAN），虚拟网卡网段（154.x/26.x/176.x）不通。
-- **Windows 主机本机 git:// push 挂起（已知约束，2026-08-19 实测）**：本机 git 2.55 经 git:// 推送必挂
-  （pack-objects 0 CPU 僵死，loopback 同症；clone/fetch 与文件路径推送正常），判定为该客户端在
-  git:// 传输上的缺陷。**主机本地组件（如 reviewer）一律用裸仓文件路径作 remote**；
-  跨机推送不受影响（Debian 二机已验证）。
+- **Windows 主机本机 git:// push 挂起（已知约束，2026-08-18 实测复现）**：本机 git 2.55 经 git:// 推送必挂
+  （客户端 pack-objects 0 CPU 僵死，25s+ 无进展；`--no-thin` 同样挂起）。排除 daemon 与 thin-pack：
+  同一 daemon 下服务端 receive-pack 正常就位、file-path remote 推送秒成功、跨机 git:// 推送正常
+  （Debian 二机验证）——定位在「本机客户端 + git:// 协议」组合，疑似 git 2.55 客户端 bug，
+  根因尚未完全定位（本机回环 vs 跨机路径差异未 100% 排除）。**主机本地组件（如 reviewer）一律用
+  裸仓文件路径作 remote**；跨机推送不受影响。
 
 ---
 
@@ -299,7 +311,7 @@ G2 剩余范围：daemon 登录无关计划任务持久化 + git_event 报文定
 | Q4 | git 安装并入 setup_worker_windows.ps1 | 并入；涉既有脚本修改，施工时单独授权 |
 | Q5 | daemon 持久化 | G2 先独立计划任务（AgentBusGitDaemon + watchdog）；comm_node 统管为长期归属 |
 | Q6 | 防火墙范围 | 限子网 192.168.31.0/24 |
-| Q7 | 审查者选型与切换（2026-08-19 补充） | 暂定 TraeWork CN 承载（traework 执行器）；可人工切换：data/reviewer.json 动态解析，改文件即生效（D5） |
+| Q7 | 审查者选型与切换（2026-08-18 补充） | 暂定 TraeWork CN 承载（traework 执行器）；可人工切换：data/reviewer.json 动态解析，改文件即生效（D5） |
 
 ### 保留项（不阻塞施工，随里程碑细化）
 
@@ -309,7 +321,7 @@ G2 剩余范围：daemon 登录无关计划任务持久化 + git_event 报文定
 
 ---
 
-## 11. 外部评审回应（opencode，2026-08-19）
+## 11. 外部评审回应（opencode，2026-08-18）
 
 v0.2 交本机 opencode（nemotron-3-ultra-free）独立评审，裁决如下（v0.3 已落实"吸收"项）。
 
