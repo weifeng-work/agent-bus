@@ -1,4 +1,4 @@
-# 受控机远程更新脚本（服务形态，Phase 4）
+﻿# 受控机远程更新脚本（服务形态，Phase 4）
 #
 # 由主控通过 shell_exec 触发。服务形态下：
 #   - 停 NSSM 服务 AgentBusCore

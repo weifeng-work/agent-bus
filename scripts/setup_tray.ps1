@@ -1,4 +1,4 @@
-# Agent Bus 通信节点（服务化 + 托盘）安装 —— Phase 4（NSSM 服务 + 开始菜单快捷方式）
+﻿# Agent Bus 通信节点（服务化 + 托盘）安装 —— Phase 4（NSSM 服务 + 开始菜单快捷方式）
 #
 # 做什么:
 #   1. 读取设备身份（~/.config/agent-bus/device.json，join_team 写入）
