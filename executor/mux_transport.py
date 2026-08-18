@@ -108,28 +108,73 @@ class MuxTransport:
     def attach_visible(self, name: str) -> bool:
         """为会话打开人类可见的交互附着窗口（直接观察 TUI 对话流）。
 
-        - 仅 Windows（Linux 无人值守节点直接返回 False，调用方不视为错误）
-        - cmd /c 载体: kill-session 后附着客户端退出，窗口自动关闭，无需 teardown 配合
-        - mode con 预置与创建时一致的几何（评审共识: 几何 pin 死防 viewer resize 错位）
-        - 窗口标题 = 会话名（sanitize 掉 cmd 元字符）
+        跨平台实现：
+        - Windows : cmd.exe 新控制台 + psmux attach-session（mode con 预置几何）
+        - Linux   : 探测图形会话（DISPLAY），用 xfce4-terminal 等终端模拟器
+                    弹可见窗口去 tmux attach-session；无显示则返回 False（headless）
+        - 窗口标题 = 会话名；几何尽量对齐创建大小
+        - kill-session 后附着客户端退出 → 窗口自动关闭（终端 -e 载体）
         """
-        if not IS_WIN:
+        if IS_WIN:
+            safe_title = "".join(c for c in name if c not in '&|<>^"')
+            cmd = (f"title {safe_title} & "
+                   f"mode con cols={self.cols} lines={self.rows} & "
+                   f"{self.binary} attach-session -t {name}")
+            try:
+                if " " in self.binary:
+                    subprocess.Popen(["cmd.exe", "/S", "/c", f'"{cmd}"'],
+                                     env=self._env, creationflags=_VISIBLE_CONSOLE)
+                else:
+                    subprocess.Popen(["cmd.exe", "/c", cmd],
+                                     env=self._env, creationflags=_VISIBLE_CONSOLE)
+                return True
+            except OSError:
+                return False
+
+        # ---- Linux: 弹桌面终端模拟器去 tmux attach ----
+        display = self._resolve_display()
+        if not display:
+            return False  # 无图形会话 → headless，不弹窗
+        term = self._find_linux_terminal()
+        if not term:
             return False
-        safe_title = "".join(c for c in name if c not in '&|<>^"')
-        cmd = (f"title {safe_title} & "
-               f"mode con cols={self.cols} lines={self.rows} & "
-               f"{self.binary} attach-session -t {name}")
+        # 终端 -e 载体跑 tmux attach；会话被 kill 后客户端退出 → 窗口自动关闭
+        attach_cmd = [self.binary, "attach-session", "-t", name]
+        env = dict(self._env)
+        env["DISPLAY"] = display
         try:
-            if " " in self.binary:
-                # 路径含空格: /S /c 让 cmd 把整条带引号命令串原样执行
-                subprocess.Popen(["cmd.exe", "/S", "/c", f'"{cmd}"'],
-                                 env=self._env, creationflags=_VISIBLE_CONSOLE)
-            else:
-                subprocess.Popen(["cmd.exe", "/c", cmd],
-                                 env=self._env, creationflags=_VISIBLE_CONSOLE)
+            subprocess.Popen([term, "-e"] + attach_cmd,
+                             env=env, start_new_session=True)
             return True
         except OSError:
             return False
+
+    @staticmethod
+    def _resolve_display() -> str:
+        """解析可用的 DISPLAY。优先环境变量；为空则探测桌面会话（:0 等）。"""
+        if os.environ.get("DISPLAY"):
+            return os.environ["DISPLAY"]
+        # 常见 X 显示；若环境变量未设，尝试 :0（多数 Linux 桌面默认）
+        for cand in (":0", ":0.0"):
+            if os.name != "nt":
+                try:
+                    r = subprocess.run(["xdpyinfo"], env={**os.environ, "DISPLAY": cand},
+                                       capture_output=True, timeout=5)
+                    if r.returncode == 0:
+                        return cand
+                except Exception:
+                    continue
+        return ""
+
+    @staticmethod
+    def _find_linux_terminal() -> str:
+        """探测 Linux 可用的图形终端模拟器。"""
+        for name in ("xfce4-terminal", "xterm", "gnome-terminal",
+                     "konsole", "mate-terminal", "x-terminal-emulator"):
+            path = shutil.which(name)
+            if path:
+                return path
+        return ""
 
     def pane_pid(self, target: str):
         """取 pane 主进程 PID（进程树看护用）。"""
